@@ -36,12 +36,12 @@ Public Class RequestHandler
                     HandleCreateTokenRequest(request, response)
                 Case "/api/transfer_tokens"
                     HandleTransferTokensRequest(request, response)
-                Case "/api/get_balance"
-                    HandleGetBalanceRequest(request, response)
                 Case "/api/get_tokens_owned"
                     HandleGetTokensOwnedRequest(request, response)
                 Case "/api/get_transaction_history"
                     HandleGetTransactionHistoryRequest(request, response)
+                Case "/api/transaction"
+                    HandleTransactionTrackingRequest(request, response)
                 Case "/api/get_token_names"
                     HandleGetTokenNamesRequest(request, response)
                 Case "/api/get_transaction_by_hash"
@@ -212,6 +212,74 @@ Public Class RequestHandler
         End If
     End Sub
 
+    Private Sub HandleTransactionTrackingRequest(request As HttpListenerRequest, response As HttpListenerResponse)
+        If request.HttpMethod = "GET" Then
+            Try
+                ' Get the txId from the query parameters
+                Dim txId As String = request.QueryString("id")
+
+                ' Check if txId is provided
+                If String.IsNullOrEmpty(txId) Then
+                    HandleErrorResponse(response, 400, "id is required")
+                    Return
+                End If
+
+                ' Check mempool first
+                Dim mempoolTransaction As JObject = blockchain._mempool.GetTransactionByTxId(txId)
+                If mempoolTransaction IsNot Nothing Then
+                    ' Transaction found in mempool
+                    Dim transactionData = JObject.Parse(mempoolTransaction("transaction").ToString()) ' Parse transaction data
+                    Dim responseObject = New With {
+                    .status = "Pending",
+                    .transaction = transactionData
+                }
+                    Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
+                    SendJsonResponse(response, 200, jsonResponse)
+                    Return
+                End If
+
+                ' If not in mempool, search the blockchain
+                For Each block As Block In blockchain.Chain
+                    For Each transaction As JObject In block.Data
+                        Dim transactionData = JObject.Parse(transaction("transaction").ToString())
+                        If transactionData("txId").ToString() = txId Then
+                            ' Transaction found in blockchain
+                            Dim responseObject = New With {
+                            .status = "Complete",
+                            .timestamp = block.Timestamp.ToString("yyyy-MM-dd HH:mm:ss"),
+                            .blockIndex = block.Index,
+                            .blockHash = block.Hash,
+                            .nonce = block.Nonce,
+                            .transaction = transactionData
+                        }
+                            Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
+                            SendJsonResponse(response, 200, jsonResponse)
+                            Return
+                        End If
+                    Next
+                Next
+
+                ' Transaction not found
+                HandleErrorResponse(response, 404, "Transaction not found")
+
+            Catch ex As Exception
+                HandleErrorResponse(response, 500, $"Error tracking transaction: {ex.Message}")
+            End Try
+        Else
+            HandleErrorResponse(response, 405, "Method Not Allowed")
+        End If
+    End Sub
+
+    ' Helper function to send JSON response
+    Private Sub SendJsonResponse(response As HttpListenerResponse, statusCode As Integer, jsonResponse As String)
+        response.StatusCode = statusCode
+        response.ContentType = "application/json"
+        Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
+        response.ContentLength64 = buffer.Length
+        Using output As System.IO.Stream = response.OutputStream
+            output.Write(buffer, 0, buffer.Length)
+        End Using
+    End Sub
 
     Private Sub HandleValidatePublicKeyRequest(request As HttpListenerRequest, response As HttpListenerResponse)
         If request.HttpMethod = "GET" Then
@@ -336,6 +404,7 @@ Public Class RequestHandler
     Private Sub HandleTransferTokensRequest(request As HttpListenerRequest, response As HttpListenerResponse)
         If request.HttpMethod = "POST" Then
             Try
+                Dim txId As String ' Declare txId here
                 Using reader As New StreamReader(request.InputStream)
                     Dim jsonContent = reader.ReadToEnd()
                     Dim jsonObject = JObject.Parse(jsonContent)
@@ -348,7 +417,9 @@ Public Class RequestHandler
 
                     ' You might want to add validation here to ensure all required fields are present
 
-                    blockchain.TransferTokens(toAddress, amount, tokenSymbol, signature, fromAddressPublicKey) ' Pass public key
+                    'blockchain.TransferTokens(toAddress, amount, tokenSymbol, signature, fromAddressPublicKey) ' Pass public key
+                    ' Call TransferTokens and get the txId
+                    txId = blockchain.TransferTokens(toAddress, amount, tokenSymbol, signature, fromAddressPublicKey)
 
                 End Using
 
@@ -358,7 +429,8 @@ Public Class RequestHandler
 
                 ' Write the response
                 Dim responseObject = New With {
-                .message = "Tokens transferred successfully!"
+                .message = "Token transferred successfully!",
+                .txId = txId ' Include the txId in the response
             }
                 Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
                 Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)

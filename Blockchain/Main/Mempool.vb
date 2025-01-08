@@ -27,4 +27,14 @@ Public Class Mempool
     Public Function Count() As Integer
         Return _transactions.Count
     End Function
+
+    Public Function GetTransactionByTxId(txId As String) As JObject
+        For Each transaction As JObject In _transactions
+            Dim transactionData = JObject.Parse(transaction("transaction").ToString())
+            If transactionData("txId").ToString() = txId Then
+                Return transaction
+            End If
+        Next
+        Return Nothing
+    End Function
 End Class

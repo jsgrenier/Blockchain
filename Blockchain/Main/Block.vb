@@ -1,15 +1,16 @@
 ﻿Imports System.Security.Cryptography
 Imports System.Text
+Imports Newtonsoft.Json.Linq
 
 Public Class Block
     Public Property Index As Integer
     Public Property Timestamp As DateTime
-    Public Property Data As String
+    Public Property Data As List(Of JObject) ' Change Data to a list of JObjects
     Public Property PreviousHash As String
     Public Property Hash As String
     Public Property Nonce As Integer
 
-    Public Sub New(index As Integer, timestamp As DateTime, data As String, previousHash As String)
+    Public Sub New(index As Integer, timestamp As DateTime, data As List(Of JObject), previousHash As String) ' Update constructor
         Me.Index = index
         Me.Timestamp = timestamp
         Me.Data = data
@@ -19,7 +20,10 @@ Public Class Block
     End Sub
 
     Public Function CalculateHash() As String
-        Dim dataToHash As String = Me.Index.ToString() & Me.Timestamp.ToString() & Me.Data & Me.PreviousHash & Me.Nonce.ToString()
+        ' Concatenate all transaction hashes for the block data
+        'Dim transactionHashes As String = String.Join("", Me.Data.Select(Function(t) t("Hash").ToString()))
+        Dim dataToHash As String = Me.Index.ToString() & Me.Timestamp.ToString() & Me.Data.ToList.ToString() & Me.PreviousHash & Me.Nonce.ToString()
+        'Dim dataToHash As String = Me.Index.ToString() & Me.Timestamp.ToString() & Me.Hash & Me.PreviousHash & Me.Nonce.ToString()
         Return HashString(dataToHash)
     End Function
 

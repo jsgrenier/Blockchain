@@ -1,5 +1,4 @@
-﻿Imports System.ComponentModel.Design
-Imports System.Security.Cryptography
+﻿Imports System.Security.Cryptography
 Imports System.Text
 Imports Org.BouncyCastle.Asn1.X9
 Imports Org.BouncyCastle.Crypto
