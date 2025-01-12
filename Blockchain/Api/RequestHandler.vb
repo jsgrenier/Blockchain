@@ -366,6 +366,7 @@ Public Class RequestHandler
     Private Sub HandleCreateTokenRequest(request As HttpListenerRequest, response As HttpListenerResponse)
         If request.HttpMethod = "POST" Then
             Try
+                Dim txId As String ' Declare txId here
                 Using reader As New StreamReader(request.InputStream)
                     Dim requestBody As String = reader.ReadToEnd()
                     Dim jsonObject As JObject = JObject.Parse(requestBody)
@@ -376,7 +377,7 @@ Public Class RequestHandler
                     Dim ownerPublicKey As String = jsonObject("ownerPublicKey").ToString()
                     Dim signature As String = jsonObject("signature").ToString() ' Get the signature
 
-                    blockchain.CreateToken(name, symbol, initialSupply, ownerPublicKey, signature) ' Pass the signature
+                    txId = blockchain.CreateToken(name, symbol, initialSupply, ownerPublicKey, signature) ' Pass the signature
 
                     ' Set the response status code and content type
                     response.StatusCode = 200
@@ -384,7 +385,8 @@ Public Class RequestHandler
 
                     ' Write the response
                     Dim responseObject = New With {
-                    .message = "Token creation request received successfully!" ' Changed message
+                    .message = "Transaction added to mempool successfully!", ' Changed message
+                    .txId = txId ' Include the txId in the response
                 }
                     Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
                     Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
@@ -429,7 +431,7 @@ Public Class RequestHandler
 
                 ' Write the response
                 Dim responseObject = New With {
-                .message = "Token transferred successfully!",
+                .message = "Transaction added to mempool successfully!",
                 .txId = txId ' Include the txId in the response
             }
                 Dim jsonResponse = JsonConvert.SerializeObject(responseObject)

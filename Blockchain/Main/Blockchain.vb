@@ -293,40 +293,51 @@ Public Class Blockchain
 
 #Region "POST Actions"
     ' Token creation
-    Public Sub CreateToken(name As String, symbol As String, initialSupply As Integer, fromPublicKey As String, signature As String) ' Add signature parameter
+    Public Function CreateToken(name As String, symbol As String, initialSupply As Integer, fromPublicKey As String, signature As String) As String ' Add signature parameter
         ' Check for duplicate token name (case-insensitive)
-        If TokenNameExists(name) Then
-            Throw New Exception("A token with this name already exists.")
-        End If
+        Try
 
-        ' Check for duplicate symbol (case-sensitive)
-        If TokenSymbolExists(symbol) Then
-            Throw New Exception("A token with this symbol already exists.")
-        End If
 
-        ' Construct the data string that was signed on the client-side (consistent with client-side)
-        Dim dataToSign As String = $"{name}:{symbol}:{initialSupply}:{fromPublicKey}"
+            If TokenNameExists(name) Then
+                Throw New Exception("A token with this name already exists.")
+            End If
 
-        ' Verify the signature using the provided ownerPublicKey and dataToSign
-        If Not Wallet.VerifySignature(fromPublicKey, signature, dataToSign) Then
-            Throw New Exception("Invalid signature. Token creation canceled.")
-        End If
-        Console.WriteLine("Signature verified successfully.")
+            ' Check for duplicate symbol (case-sensitive)
+            If TokenSymbolExists(symbol) Then
+                Throw New Exception("A token with this symbol already exists.")
+            End If
 
-        ' Create token data including the signature
-        Dim tokenData = JObject.FromObject(New With {
-        .timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-        .type = "tokenCreation",
-        .name = name,
-        .symbol = symbol,
-        .initialSupply = initialSupply,
-        .owner = fromPublicKey
-    }).ToString()
+            ' Construct the data string that was signed on the client-side (consistent with client-side)
+            Dim dataToSign As String = $"{name}:{symbol}:{initialSupply}:{fromPublicKey}"
 
-        ' Add the transaction to the mempool
-        AddTransactionToMempool(tokenData)
-        Console.WriteLine("tokenCreation transaction added to the mempool.")
-    End Sub
+            ' Verify the signature using the provided ownerPublicKey and dataToSign
+            If Not Wallet.VerifySignature(fromPublicKey, signature, dataToSign) Then
+                Throw New Exception("Invalid signature. Token creation canceled.")
+            End If
+            Console.WriteLine("Signature verified successfully.")
+
+            ' Create token data including the signature
+            Dim tokenData = JObject.FromObject(New With {
+            .timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+            .type = "tokenCreation",
+            .name = name,
+            .symbol = symbol,
+            .initialSupply = initialSupply,
+            .owner = fromPublicKey
+        }).ToString()
+
+            ' Add the transaction to the mempool and get the txId
+            Dim txId As String = AddTransactionToMempool(tokenData)
+
+            Console.WriteLine("Transfer transaction added to the mempool.")
+
+            ' Return the txId
+            Return txId
+        Catch ex As Exception
+            Console.WriteLine($"Error in TransferTokens: {ex.Message}")
+            Throw
+        End Try
+    End Function
 
     Public Function TransferTokens(toAddress As String, amount As Decimal, tokenSymbol As String, signature As String, fromAddress As String) As String ' Add return type String
         Try

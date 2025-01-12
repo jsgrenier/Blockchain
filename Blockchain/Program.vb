@@ -22,7 +22,7 @@ Module Program
             ' Start the API server
             Dim server As New WebServer(blockchain)
             server.Start()
-            'blockchain.StartValidationThread()
+            blockchain.StartValidationThread()
 
             ' Wait for user input to stop the server
             Console.WriteLine("Press Enter to stop the server...")
