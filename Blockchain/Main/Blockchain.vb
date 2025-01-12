@@ -293,7 +293,7 @@ Public Class Blockchain
 
 #Region "POST Actions"
     ' Token creation
-    Public Function CreateToken(name As String, symbol As String, initialSupply As Integer, fromPublicKey As String, signature As String) As String ' Add signature parameter
+    Public Function CreateToken(name As String, symbol As String, initialSupply As Decimal, fromPublicKey As String, signature As String) As String ' Add signature parameter
         ' Check for duplicate token name (case-insensitive)
         Try
 

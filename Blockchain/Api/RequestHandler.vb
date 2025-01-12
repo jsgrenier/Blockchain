@@ -373,7 +373,7 @@ Public Class RequestHandler
 
                     Dim name As String = jsonObject("name").ToString()
                     Dim symbol As String = jsonObject("symbol").ToString()
-                    Dim initialSupply As Integer = Integer.Parse(jsonObject("initialSupply").ToString())
+                    Dim initialSupply As Decimal = Decimal.Parse(jsonObject("initialSupply").ToString())
                     Dim ownerPublicKey As String = jsonObject("ownerPublicKey").ToString()
                     Dim signature As String = jsonObject("signature").ToString() ' Get the signature
 
