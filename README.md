@@ -1,0 +1,1 @@
+<h1>This project is a simulation of basic functionnalities found in many blockchain to an API server. It could be used as a starter template to build a blockchain using .NET but it still need a lot of work to confirm.</h1>
