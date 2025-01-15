@@ -28,9 +28,10 @@ Module Program
             Console.WriteLine("Press Enter to stop the server...")
             Console.ReadLine()
 
+            blockchain.StopValidationThread()
             ' Stop the API server gracefully
             server.Kill()
-            blockchain.StopValidationThread()
+
 
         Catch ex As Exception
             Console.WriteLine($"Error: {ex.Message}")

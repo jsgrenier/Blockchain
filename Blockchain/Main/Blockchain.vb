@@ -282,7 +282,7 @@ Public Class Blockchain
         Dim txId As String = Guid.NewGuid().ToString("N")
         txData.Add("txId", txId)
         ' Add the original transaction data
-        transaction.Add("transaction", txData.ToString()) 'transactionData)
+        transaction.Add("transaction", txData)
         ' Add the transaction to the mempool
         _mempool.AddTransaction(transaction)
         Console.WriteLine("Transaction added to the mempool.")
