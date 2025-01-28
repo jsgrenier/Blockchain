@@ -322,10 +322,15 @@ Public Class RequestHandler
                 response.StatusCode = 200
                 response.ContentType = "application/json"
 
-                ' Write the response
+                ' Create the JSON response
                 Dim jsonResponse = JsonConvert.SerializeObject(blockchain.Chain)
                 Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
                 response.ContentLength64 = buffer.Length
+
+                ' Print the response in the console
+                'Console.WriteLine("Response: " & jsonResponse)
+
+                ' Write the response to the output stream
                 Using output As System.IO.Stream = response.OutputStream
                     output.Write(buffer, 0, buffer.Length)
                 End Using
@@ -336,6 +341,7 @@ Public Class RequestHandler
             HandleErrorResponse(response, 405, "Method Not Allowed")
         End If
     End Sub
+
 
     Private Sub HandleCheckValidityRequest(request As HttpListenerRequest, response As HttpListenerResponse)
         If request.HttpMethod = "GET" Then
@@ -444,44 +450,6 @@ Public Class RequestHandler
             Catch ex As Exception
                 ' Generate the error response here:
                 HandleErrorResponse(response, 500, $"Error transferring tokens: {ex.Message}")
-            End Try
-        Else
-            HandleErrorResponse(response, 405, "Method Not Allowed")
-        End If
-    End Sub
-
-
-    Private Sub HandleGetBalanceRequest(request As HttpListenerRequest, response As HttpListenerResponse)
-        If request.HttpMethod = "GET" Then
-            Try
-                Dim address As String = request.QueryString("address")
-                Dim tokenSymbol As String = request.QueryString("tokenSymbol")
-
-                If String.IsNullOrEmpty(address) OrElse String.IsNullOrEmpty(tokenSymbol) Then
-                    HandleErrorResponse(response, 400, "Missing address or tokenSymbol parameter")
-                    Return
-                End If
-
-                Dim balance As Decimal = blockchain.GetTokenBalance(address, tokenSymbol)
-
-                ' Set the response status code and content type
-                response.StatusCode = 200
-                response.ContentType = "application/json"
-
-                ' Write the response
-                Dim responseObject = New With {
-                    .address = address,
-                    .tokenSymbol = tokenSymbol,
-                    .balance = balance
-                }
-                Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
-                Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
-                response.ContentLength64 = buffer.Length
-                Using output As System.IO.Stream = response.OutputStream
-                    output.Write(buffer, 0, buffer.Length)
-                End Using
-            Catch ex As Exception
-                HandleErrorResponse(response, 500, $"Error getting balance: {ex.Message}")
             End Try
         Else
             HandleErrorResponse(response, 405, "Method Not Allowed")

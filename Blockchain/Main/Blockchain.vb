@@ -7,11 +7,10 @@ Public Class Blockchain
 
     Public Property Chain As List(Of Block)
     Private _dbConnection As SqliteConnection
-    Private _difficulty As Integer = 4 ' You can adjust difficulty
+    Public Property _difficulty As Integer = 6 ' You can adjust difficulty
     Public _mempool As New Mempool() ' Initialize the mempool
 
-    Private _validationThread As Thread
-    Private _stopValidation As Boolean = False ' Flag to signal thread termination
+
 
     Public Sub New(dbFilePath As String)
         Chain = New List(Of Block)
@@ -75,7 +74,7 @@ Public Class Blockchain
         End If
     End Sub
 
-    Private Sub SaveBlockToDatabase(block As Block)
+    Public Sub SaveBlockToDatabase(block As Block)
         Try
             _dbConnection.Open()
             Dim insertQuery As String = "INSERT INTO Blocks ([Index], Timestamp, Data, PreviousHash, Hash, Nonce) 
@@ -104,173 +103,41 @@ Public Class Blockchain
 #Region "Block related"
     ' Creates the initial block of the blockchain
     Private Sub AddGenesisBlock()
-        ' Create an empty list of transactions for the genesis block
-        Dim genesisData As New List(Of JObject)
+        ' Create the BEAN token in the genesis block
+        Dim tokenCreationData = JObject.FromObject(New With {
+        .timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+        .type = "tokenCreation",
+        .name = "Beancoin",
+        .symbol = "BEAN",
+        .initialSupply = 0,
+        .owner = "genesis",
+        .txId = Guid.NewGuid.ToString("N")
+    })
 
-        Dim genesisBlock As New Block(0, DateTime.Now, genesisData, "0") ' Use the empty list
+        Dim genesisData As New List(Of JObject) From {
+        JObject.FromObject(New With {
+            .transaction = tokenCreationData
+        })
+    }
+
+        Dim genesisBlock As New Block(0, DateTime.Now, genesisData, "0")
         genesisBlock.Mine(_difficulty)
         Chain.Add(genesisBlock)
         SaveBlockToDatabase(genesisBlock)
     End Sub
+
+    ' Get the latest block in the chain
+    Public Function GetLatestBlock() As Block
+        If Chain.Count > 0 Then
+            Return Chain.Last()
+        End If
+
+        Return Nothing
+    End Function
 #End Region
 
 #Region "Validation"
-    Private Function IsDoubleSpend(transaction As JObject) As Boolean
-        ' Check if the transaction object has the "Data" property
-        If transaction.ContainsKey("Data") Then
-            ' Parse the 'Data' field into a JObject
-            Dim dataObj As JObject = JObject.Parse(transaction("Data").ToString())
 
-            ' Check if the "inputs" field exists and is an array within "Data"
-            If dataObj IsNot Nothing AndAlso dataObj.TryGetValue("inputs", New JArray) AndAlso dataObj("inputs").GetType().IsAssignableFrom(GetType(JArray)) Then
-                Dim inputs As JArray = dataObj("inputs")
-                Dim spentOutputs As New HashSet(Of String) ' Keep track of spent outputs
-
-                For Each input As JObject In inputs
-                    ' Check if the input has the required fields
-                    If Not input.ContainsKey("txHash") OrElse Not input.ContainsKey("outputIndex") Then
-                        Continue For ' Skip this input if it doesn't have the required fields
-                    End If
-
-                    Dim txHash As String = input("txHash").ToString()
-                    Dim outputIndex As Integer = CInt(input("outputIndex"))
-
-                    Dim outputId = $"{txHash}:{outputIndex}" ' Unique identifier for the output
-
-                    ' Check if this output has already been spent
-                    If spentOutputs.Contains(outputId) Then
-                        Return True ' Double-spend detected
-                    End If
-
-                    spentOutputs.Add(outputId) ' Add the output to the spent outputs set
-                Next
-
-                Return False ' No double-spend detected
-            Else
-                Return False ' No inputs or invalid input format, so no double-spend
-            End If
-        Else
-            Return False ' "Data" property not found in the transaction object
-        End If
-    End Function
-
-    ' Helper function to check for sufficient balance
-    Private Function HasSufficientBalance(transaction As JObject) As Boolean
-        ' Check if the transaction object has the "Data" property
-        If transaction.ContainsKey("Data") Then
-            ' Parse the 'Data' field into a JObject
-            Dim dataObj As JObject = JObject.Parse(transaction("Data").ToString())
-
-            If dataObj IsNot Nothing AndAlso dataObj("type").ToString() = "transfer" Then
-                Dim fromAddress As String = dataObj("from").ToString()
-                Dim amount As Decimal = CDec(dataObj("amount"))
-                Dim tokenSymbol As String = dataObj("token").ToString()
-
-                Dim balance As Decimal = GetTokenBalance(fromAddress, tokenSymbol)
-
-                ' Check if the sender has enough balance, considering the transaction fee
-                Return balance >= amount
-            Else
-                Return True ' Not a transfer or invalid data format, so no balance check needed
-            End If
-        Else
-            Return True ' "Data" property not found, so no balance check needed
-        End If
-    End Function
-
-    ' Start the validation thread
-    Public Sub StartValidationThread()
-        _stopValidation = False ' Reset the flag
-        _validationThread = New Thread(AddressOf ValidateTransactions)
-        _validationThread.Start()
-        Console.WriteLine("Transaction validation thread started.")
-    End Sub
-
-    ' Stop the validation thread
-    Public Sub StopValidationThread()
-        _stopValidation = True
-        _validationThread.Join() ' Wait for the thread to finish
-        Console.WriteLine("Transaction validation thread stopped.")
-    End Sub
-
-    ' Method to validate transactions periodically
-    Private Sub ValidateTransactions()
-        While Not _stopValidation
-            ' Validate and process transactions from the mempool in batches
-            If _mempool.Count() > 0 Then
-                Console.WriteLine("Validating transactions...")
-
-                ' Create a new block with validated transactions
-                Dim newBlockData As New List(Of JObject)
-
-                ' Create a copy of the transactions list to avoid modification issues
-                Dim transactionsToValidate = _mempool.GetTransactions().ToList()
-
-                For Each transaction In transactionsToValidate
-                    Try
-                        Dim isValid = True ' Flag to track transaction validity
-
-                        ' Parse the 'Data' field into a JObject
-                        Dim dataObj As JObject = JObject.Parse(transaction("transaction").ToString())
-
-                        ' Now you can access properties of dataObj directly
-                        If dataObj IsNot Nothing Then
-                            ' 1. Double-Spending Check
-                            If IsDoubleSpend(dataObj) Then ' Pass dataObj directly
-                                Console.WriteLine($"Invalid transaction: Double-spending detected - {transaction}")
-                                isValid = False
-                            End If
-
-                            ' 2. Sufficient Balance Check
-                            If Not HasSufficientBalance(dataObj) Then ' Pass dataObj directly
-                                Console.WriteLine($"Invalid transaction: Insufficient balance - {transaction}")
-                                isValid = False
-                            End If
-
-                            ' 3. Other Validation Checks (Add more as needed)
-                            ' ...
-
-                            ' If validation is successful, add this transaction to the block
-                            If isValid Then
-                                ' Wrap the transaction data in a JObject with a "Data" property
-                                Dim transactionWrapper As New JObject()
-                                transactionWrapper("transaction") = dataObj
-                                newBlockData.Add(transactionWrapper)
-                                Console.WriteLine($"Transaction added to block: {dataObj.ToString()}")
-                            End If
-                        Else
-                            Console.WriteLine($"Invalid transaction: Invalid data format - {transaction}")
-                            isValid = False
-                        End If
-
-                    Catch ex As Exception
-                        Console.WriteLine($"Error validating transaction: {ex.Message}")
-                    Finally
-                        ' Remove the processed transaction from the mempool (whether valid or invalid)
-                        _mempool.RemoveTransaction(transaction)
-                    End Try
-                Next
-
-                ' Create the new block with the list of validated transactions
-                If newBlockData.Count > 0 Then
-                    Dim newIndex As Integer = Chain.Count
-                    Dim previousHash As String = If(Chain.Count > 0, Chain.Last().Hash, "0")
-                    Dim newBlock As New Block(newIndex, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"), newBlockData, previousHash) ' Create block with the list
-                    newBlock.Mine(_difficulty)
-
-                    ' Add the new block to the chain and database
-                    Chain.Add(newBlock)
-                    SaveBlockToDatabase(newBlock)
-
-                    Console.WriteLine("Block added to the chain.")
-                End If
-
-                Console.WriteLine("Transactions validated and processed.")
-            End If
-
-            Thread.Sleep(10000) ' Wait for 10 seconds
-        End While
-    End Sub
 #End Region
 
 #Region "Mempool"
@@ -282,7 +149,7 @@ Public Class Blockchain
         Dim txId As String = Guid.NewGuid().ToString("N")
         txData.Add("txId", txId)
         ' Add the original transaction data
-        transaction.Add("transaction", txData)
+        transaction.Add("transaction", txData) 'transactionData)
         ' Add the transaction to the mempool
         _mempool.AddTransaction(transaction)
         Console.WriteLine("Transaction added to the mempool.")
@@ -340,97 +207,67 @@ Public Class Blockchain
     End Function
 
     Public Function TransferTokens(toAddress As String, amount As Decimal, tokenSymbol As String, signature As String, fromAddress As String) As String ' Add return type String
-        Try
-            ' Prevent transfers to the same address
-            If fromAddress = toAddress Then
+        Try
+            ' Prevent transfers to the same address
+            If fromAddress = toAddress Then
                 Throw New Exception("Cannot transfer tokens to the same address.")
             End If
 
-            ' Get sender's public key
-            Dim fromAddressPublicKey As String = GetPublicKeyForAddress(fromAddress)
+            ' Get sender's public key
+            Dim fromAddressPublicKey As String = GetPublicKeyForAddress(fromAddress)
             Console.WriteLine($"Retrieved public key from sender: {fromAddress}")
 
-            ' Construct the data string that was signed on the client-side (consistent with client-side)
-            Dim dataToSign As String = $"{fromAddress}:{toAddress}:{amount}:{tokenSymbol}"
+            ' Construct the data string that was signed on the client-side (consistent with client-side)
+            Dim dataToSign As String = $"{fromAddress}:{toAddress}:{amount}:{tokenSymbol}"
 
-            ' Verify the signature
-            If Not Wallet.VerifySignature(fromAddressPublicKey, signature, dataToSign) Then
+            ' Verify the signature
+            If Not Wallet.VerifySignature(fromAddressPublicKey, signature, dataToSign) Then
                 Throw New Exception($"Invalid signature. Token transfer canceled.")
             End If
             Console.WriteLine("Signature verified successfully.")
 
-            ' Validate balance
-            If GetTokenBalance(fromAddress, tokenSymbol) < amount Then
+            ' Validate balance
+            Dim tokenBalances = GetTokensOwned(fromAddress)
+            If Not tokenBalances.ContainsKey(tokenSymbol) Or tokenBalances(tokenSymbol) < amount Then
                 Throw New Exception("Insufficient balance for token transfer.")
             End If
             Console.WriteLine("Balance check passed.")
 
-            ' Validate amount (ensure it's greater than zero with tolerance)
-            If Not amount > 0.00000001D Then
+            ' Validate amount (ensure it's greater than zero with tolerance)
+            If Not amount > 0.00000001D Then
                 Throw New Exception("Cannot process transaction with zero amount")
             End If
 
 
 
-            ' Create transfer data
-            Dim transferData = JObject.FromObject(New With {
-            .timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-            .type = "transfer",
-            .from = fromAddress,
-            .to = toAddress,
-            .amount = amount,
-            .token = tokenSymbol
-        }).ToString()
+            ' Create transfer data
+            Dim transferData = JObject.FromObject(New With {
+      .timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+      .type = "transfer",
+      .from = fromAddress,
+      .to = toAddress,
+      .amount = amount,
+      .token = tokenSymbol
+    }).ToString()
 
-            ' Add the transaction to the mempool and get the txId
-            Dim txId As String = AddTransactionToMempool(transferData)
+            ' Add the transaction to the mempool and get the txId
+            Dim txId As String = AddTransactionToMempool(transferData)
 
             Console.WriteLine("Transfer transaction added to the mempool.")
 
-            ' Return the txId
-            Return txId
+            ' Return the txId
+            Return txId
 
         Catch ex As Exception
-            ' Log the error and rethrow it for the caller to handle
-            Console.WriteLine($"Error in TransferTokens: {ex.Message}")
+            ' Log the error and rethrow it for the caller to handle
+            Console.WriteLine($"Error in TransferTokens: {ex.Message}")
             Throw
         End Try
     End Function
 #End Region
 
 #Region "GET Actions"
-    Public Function GetTokenBalance(address As String, tokenSymbol As String) As Decimal
-        Dim balance As Decimal = 0
 
-        For Each block As Block In Chain
-            For Each transaction As JObject In block.Data ' Iterate through transactions in the block
-                Try
-                    Dim transactionData = JObject.Parse(transaction("transaction").ToString())
-
-                    ' Check for token creation
-                    If transactionData("type").ToString() = "tokenCreation" AndAlso transactionData("symbol").ToString() = tokenSymbol Then
-                        If transactionData("owner").ToString() = address Then
-                            balance += CDec(transactionData("initialSupply"))
-                        End If
-                    End If
-
-                    ' Check for token transfers
-                    If transactionData("type").ToString() = "transfer" AndAlso transactionData("token").ToString() = tokenSymbol Then
-                        If transactionData("from").ToString() = address Then
-                            balance -= CDec(transactionData("amount"))
-                        ElseIf transactionData("to").ToString() = address Then
-                            balance += CDec(transactionData("amount"))
-                        End If
-                    End If
-
-                Catch ex As Exception
-                    Console.WriteLine($"Error processing transaction: {ex.Message}")
-                End Try
-            Next
-        Next
-
-        Return balance
-    End Function
 
 
     Public Function GetTokensOwned(address As String) As Dictionary(Of String, Decimal)
@@ -439,7 +276,7 @@ Public Class Blockchain
 
         For Each block As Block In Chain
             For Each transaction As JObject In block.Data ' Iterate through transactions in the block
-                Try
+                Try
                     Dim transactionData = JObject.Parse(transaction("transaction").ToString())
 
                     If transactionData("type").ToString() = "tokenCreation" Then
@@ -485,8 +322,8 @@ Public Class Blockchain
             Next
         Next
 
-        ' Adjust balances based on mempool transactions
-        For Each transaction As JObject In _mempool.GetTransactions()
+        ' Adjust balances based on mempool transactions
+        For Each transaction As JObject In _mempool.GetTransactions()
             Try
                 Dim transactionData = JObject.Parse(transaction("transaction").ToString())
 
@@ -519,21 +356,25 @@ Public Class Blockchain
                 Try
                     Dim transactionData = JObject.Parse(transaction("transaction").ToString())
                     Dim blockDateTime = $"{block.Timestamp:MM/dd/yyyy} {block.Timestamp:HH:mm:ss}"
-                    'Dim transactionId = transaction("txId").ToString() ' Get the transaction ID
 
                     If transactionData("type").ToString() = "transfer" Then
                         Dim from = transactionData("from").ToString()
                         Dim too = transactionData("to").ToString()
                         Dim symbol = transactionData("token").ToString()
                         Dim amount = CDec(transactionData("amount"))
+                        Dim type = If(from = "miningReward", "miningReward", transactionData("type").ToString())
+                        Dim txId = transactionData("txId").ToString()
+                        Dim txTimestamp = transactionData("timestamp").ToString()
 
                         If from = address OrElse too = address Then
                             Dim historyItem = New With {
-                            .Timestamp = block.Timestamp,
+                            .Timestamp = txTimestamp,
                             .DateTime = blockDateTime,
-                            .Type = "Transfer",
+                            .Type = type,
                             .Amount = If(from = address, $"-{amount} {symbol}", $"+{amount} {symbol}"),
-                            .Hash = block.Hash ' Use the transaction ID
+                            .Hash = block.Hash,
+                            .TxId = txId,
+                            .Status = "confirmed" ' Mark blockchain transactions as confirmed
                         }
                             historyItems.Add(historyItem)
                         End If
@@ -542,14 +383,18 @@ Public Class Blockchain
                         Dim owner = transactionData("owner").ToString()
                         Dim symbol = transactionData("symbol").ToString()
                         Dim initialSupply = CDec(transactionData("initialSupply"))
+                        Dim type = transactionData("type").ToString()
+                        Dim txTimestamp = transactionData("timestamp").ToString()
 
                         If owner = address Then
                             Dim historyItem = New With {
-                            .Timestamp = block.Timestamp,
+                            .Timestamp = txTimestamp,
                             .DateTime = blockDateTime,
-                            .Type = "TokenCreation",
+                            .Type = type,
                             .Amount = $"+{initialSupply} {symbol}",
-                            .Hash = block.Hash'transactionId ' Use the transaction ID
+                            .Hash = block.Hash,
+                            .TxId = transactionData("txId").ToString(),
+                            .Status = "confirmed" ' Mark blockchain transactions as confirmed
                         }
                             historyItems.Add(historyItem)
                         End If
@@ -559,6 +404,57 @@ Public Class Blockchain
                     Console.WriteLine($"Error processing transaction: {ex.Message}")
                 End Try
             Next
+        Next
+
+        ' Process mempool transactions
+        For Each transaction As JObject In _mempool.GetTransactions()
+            Try
+                Dim transactionData = JObject.Parse(transaction("transaction").ToString())
+
+                If transactionData("type").ToString() = "transfer" Then
+                    Dim from = transactionData("from").ToString()
+                    Dim too = transactionData("to").ToString()
+                    Dim symbol = transactionData("token").ToString()
+                    Dim amount = CDec(transactionData("amount"))
+                    Dim txId = transactionData("txId").ToString()
+                    Dim txTimestamp = transactionData("timestamp").ToString()
+
+                    If from = address OrElse too = address Then
+                        Dim historyItem = New With {
+                        .Timestamp = txTimestamp,
+                        .DateTime = txTimestamp, ' Use transaction timestamp for mempool transactions
+                        .Type = transactionData("type").ToString(),
+                        .Amount = If(from = address, $"-{amount} {symbol}", $"+{amount} {symbol}"),
+                        .Hash = "Pending", ' No block hash for mempool transactions
+                        .TxId = txId,
+                        .Status = "pending" ' Mark mempool transactions as pending
+                    }
+                        historyItems.Add(historyItem)
+                    End If
+
+                ElseIf transactionData("type").ToString() = "tokenCreation" Then
+                    Dim owner = transactionData("owner").ToString()
+                    Dim symbol = transactionData("symbol").ToString()
+                    Dim initialSupply = CDec(transactionData("initialSupply"))
+                    Dim txTimestamp = transactionData("timestamp").ToString()
+
+                    If owner = address Then
+                        Dim historyItem = New With {
+                        .Timestamp = txTimestamp,
+                        .DateTime = txTimestamp, ' Use transaction timestamp for mempool transactions
+                        .Type = transactionData("type").ToString(),
+                        .Amount = $"+{initialSupply} {symbol}",
+                        .Hash = "Pending", ' No block hash for mempool transactions
+                        .TxId = transactionData("txId").ToString(),
+                        .Status = "pending" ' Mark mempool transactions as pending
+                    }
+                        historyItems.Add(historyItem)
+                    End If
+                End If
+
+            Catch ex As Exception
+                Console.WriteLine($"Error processing mempool transaction: {ex.Message}")
+            End Try
         Next
 
         Return historyItems
@@ -697,6 +593,27 @@ Public Class Blockchain
             Next
         Next
         Return False ' Token symbol not found
+    End Function
+
+    Public Function GetTotalSupply(tokenSymbol As String) As Decimal
+        Dim totalSupply As Decimal = 0
+
+        For Each block As Block In Chain
+            For Each transaction As JObject In block.Data
+                Try
+                    Dim transactionData = JObject.Parse(transaction("transaction").ToString())
+
+                    If transactionData("type").ToString() = "tokenCreation" AndAlso transactionData("symbol").ToString() = tokenSymbol Then
+                        totalSupply += CDec(transactionData("initialSupply"))
+                    End If
+
+                Catch ex As Exception
+                    Console.WriteLine($"Error processing transaction: {ex.Message}")
+                End Try
+            Next
+        Next
+
+        Return totalSupply
     End Function
 #End Region
 
