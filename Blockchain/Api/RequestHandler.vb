@@ -230,7 +230,7 @@ Public Class RequestHandler
                     ' Transaction found in mempool
                     Dim transactionData = JObject.Parse(mempoolTransaction("transaction").ToString()) ' Parse transaction data
                     Dim responseObject = New With {
-                    .status = "Pending",
+                    .status = "pending",
                     .transaction = transactionData
                 }
                     Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
@@ -245,7 +245,7 @@ Public Class RequestHandler
                         If transactionData("txId").ToString() = txId Then
                             ' Transaction found in blockchain
                             Dim responseObject = New With {
-                            .status = "Complete",
+                            .status = "completed",
                             .timestamp = block.Timestamp.ToString("yyyy-MM-dd HH:mm:ss"),
                             .blockIndex = block.Index,
                             .blockHash = block.Hash,

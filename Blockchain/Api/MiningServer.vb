@@ -123,7 +123,7 @@ Public Class MiningServer
                                 ' Reward the miner
                                 Dim rewardAmount As Decimal = CalculateBlockReward()
                                 ' Create a coinbase transaction
-                                Dim coinbaseTx = CreateCoinbaseTransaction(minerAddress, rewardAmount)
+                                Dim coinbaseTx = CreateCoinbaseTransaction(minerAddress, rewardAmount, jsonObject("block")("Timestamp"))
 
                                 block.Data.Add(New JObject From {
                                     New JProperty("transaction", JObject.Parse(JsonConvert.SerializeObject(coinbaseTx)))
@@ -158,10 +158,10 @@ Public Class MiningServer
         End Try
     End Sub
 
-    Private Function CreateCoinbaseTransaction(minerAddress As String, rewardAmount As Decimal) As JObject
+    Private Function CreateCoinbaseTransaction(minerAddress As String, rewardAmount As Decimal, timestamp As DateTime) As JObject
         ' Create a new transaction object
         Dim transaction = New JObject()
-        transaction("timestamp") = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+        transaction("timestamp") = timestamp.ToString("yyyy-MM-dd HH:mm:ss")
         transaction("type") = "transfer"
         transaction("from") = "miningReward"
         transaction("to") = minerAddress

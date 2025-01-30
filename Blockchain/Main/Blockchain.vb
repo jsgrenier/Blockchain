@@ -374,7 +374,7 @@ Public Class Blockchain
                             .Amount = If(from = address, $"-{amount} {symbol}", $"+{amount} {symbol}"),
                             .Hash = block.Hash,
                             .TxId = txId,
-                            .Status = "confirmed" ' Mark blockchain transactions as confirmed
+                            .Status = "completed" ' Mark blockchain transactions as confirmed
                         }
                             historyItems.Add(historyItem)
                         End If
@@ -394,7 +394,7 @@ Public Class Blockchain
                             .Amount = $"+{initialSupply} {symbol}",
                             .Hash = block.Hash,
                             .TxId = transactionData("txId").ToString(),
-                            .Status = "confirmed" ' Mark blockchain transactions as confirmed
+                            .Status = "completed" ' Mark blockchain transactions as confirmed
                         }
                             historyItems.Add(historyItem)
                         End If
@@ -425,7 +425,7 @@ Public Class Blockchain
                         .DateTime = txTimestamp, ' Use transaction timestamp for mempool transactions
                         .Type = transactionData("type").ToString(),
                         .Amount = If(from = address, $"-{amount} {symbol}", $"+{amount} {symbol}"),
-                        .Hash = "Pending", ' No block hash for mempool transactions
+                        .Hash = "pending", ' No block hash for mempool transactions
                         .TxId = txId,
                         .Status = "pending" ' Mark mempool transactions as pending
                     }
@@ -444,7 +444,7 @@ Public Class Blockchain
                         .DateTime = txTimestamp, ' Use transaction timestamp for mempool transactions
                         .Type = transactionData("type").ToString(),
                         .Amount = $"+{initialSupply} {symbol}",
-                        .Hash = "Pending", ' No block hash for mempool transactions
+                        .Hash = "pending", ' No block hash for mempool transactions
                         .TxId = transactionData("txId").ToString(),
                         .Status = "pending" ' Mark mempool transactions as pending
                     }
