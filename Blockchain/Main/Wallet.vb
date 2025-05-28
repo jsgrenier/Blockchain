@@ -5,67 +5,57 @@ Imports Org.BouncyCastle.Crypto
 Imports Org.BouncyCastle.Crypto.EC
 Imports Org.BouncyCastle.Crypto.Parameters
 Imports Org.BouncyCastle.Security
+Imports Org.BouncyCastle.Math.EC ' For ECPoint.IsValid
 
 Public Class Wallet
 
-    Private Shared ReadOnly curve As X9ECParameters = ECNamedCurveTable.GetByName("secp256k1")
-    Private Shared ReadOnly domainParams As ECDomainParameters = New ECDomainParameters(curve.Curve, curve.G, curve.N, curve.H)
+    Private Shared ReadOnly curveName As String = "secp256k1"
+    Private Shared ReadOnly _curveParams As X9ECParameters = ECNamedCurveTable.GetByName(curveName)
+    Private Shared ReadOnly _domainParams As ECDomainParameters = New ECDomainParameters(_curveParams.Curve, _curveParams.G, _curveParams.N, _curveParams.H)
 
-    Public Shared Function VerifySignature(publicKey As String, signature As String, transactionData As String) As Boolean
+    Public Shared Function VerifySignature(publicKeyBase64 As String, signatureBase64 As String, message As String) As Boolean
         Try
-            ' Decode the public key
-            Dim publicKeyBytes As Byte() = Convert.FromBase64String(publicKey)
-            Dim keyParameters As New ECPublicKeyParameters(
-                curve.Curve.DecodePoint(publicKeyBytes),
-                domainParams
-            )
+            Dim publicKeyBytes As Byte() = Convert.FromBase64String(publicKeyBase64)
+            Dim q As Org.BouncyCastle.Math.EC.ECPoint = _domainParams.Curve.DecodePoint(publicKeyBytes)
+            Dim keyParameters As New ECPublicKeyParameters(q, _domainParams)
 
-            ' Create a SHA256withECDSA signer
-            Dim signer As ISigner = SignerUtilities.GetSigner("SHA256withECDSA")
-
-            ' Initialize the signer for verification
+            Dim signer As ISigner = SignerUtilities.GetSigner("SHA-256withECDSA") ' Explicitly SHA-256
             signer.Init(False, keyParameters)
 
-            ' Use the transactionData parameter directly (no need to reconstruct it)
-            Dim bytes As Byte() = Encoding.UTF8.GetBytes(transactionData)
+            Dim messageBytes As Byte() = Encoding.UTF8.GetBytes(message)
+            signer.BlockUpdate(messageBytes, 0, messageBytes.Length)
 
-            ' Update the signer with the transaction data
-            signer.BlockUpdate(bytes, 0, bytes.Length)
-
-            ' Decode the signature
-            Dim signatureBytes As Byte() = Convert.FromBase64String(signature)
-
-            ' Verify the signature
+            Dim signatureBytes As Byte() = Convert.FromBase64String(signatureBase64)
             Return signer.VerifySignature(signatureBytes)
 
+        Catch exAsn As Org.BouncyCastle.Asn1.Asn1Exception
+            Console.WriteLine($"ASN.1 parsing error during signature verification (possibly malformed signature): {exAsn.Message}")
+            Return False
         Catch ex As Exception
-            Console.WriteLine($"Error verifying signature: {ex.Message}")
+            Console.WriteLine($"Error verifying signature: {ex.Message} for pubkey: {publicKeyBase64.Substring(0, Math.Min(10, publicKeyBase64.Length))}..., message: {message}")
             Return False
         End Try
     End Function
 
-    Public Shared Function IsValidPublicKey(publicKeyString As String) As Boolean
+    Public Shared Function IsValidPublicKey(publicKeyBase64 As String) As Boolean
         Try
-            ' Decode the public key
-            Dim publicKeyBytes As Byte() = Convert.FromBase64String(publicKeyString)
-
-            ' Get the ECDomainParameters
-            Dim ecP As X9ECParameters = CustomNamedCurves.GetByName("secp256k1")
-            Dim parameters As ECDomainParameters = New ECDomainParameters(ecP.Curve, ecP.G, ecP.N, ecP.H, ecP.GetSeed())
-
-            ' Check if the public key is a valid point on the curve
-            Return parameters.Curve.DecodePoint(publicKeyBytes).IsValid()
-
+            Dim publicKeyBytes As Byte() = Convert.FromBase64String(publicKeyBase64)
+            ' Attempt to decode the point. If it fails, it's not valid for the curve.
+            Dim point As Org.BouncyCastle.Math.EC.ECPoint = _domainParams.Curve.DecodePoint(publicKeyBytes)
+            ' Check if the point is on the curve and not the point at infinity
+            Return point IsNot Nothing AndAlso Not point.IsInfinity AndAlso point.IsValid()
         Catch ex As Exception
-            Console.WriteLine($"Error validating public key: {ex.Message}")
+            ' Any exception during decoding or validation means it's not a valid key format for this curve.
+            Console.WriteLine($"Public key validation error: {ex.Message} for key starting with {publicKeyBase64.Substring(0, Math.Min(10, publicKeyBase64.Length))}...")
             Return False
         End Try
     End Function
 
     Public Shared Function CalculateSHA256Hash(input As String) As String
         Using sha256 As SHA256 = SHA256.Create()
-            Dim inputBytes As Byte() = System.Text.Encoding.UTF8.GetBytes(input)
+            Dim inputBytes As Byte() = Encoding.UTF8.GetBytes(input)
             Dim hashBytes As Byte() = sha256.ComputeHash(inputBytes)
+            ' Using ToLower() is conventional for hex strings.
             Return Convert.ToHexString(hashBytes).ToLower()
         End Using
     End Function

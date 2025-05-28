@@ -14,13 +14,22 @@ Public Class RequestHandler
     Public Sub HandleRequest(context As HttpListenerContext)
         Dim request As HttpListenerRequest = context.Request
         Dim response As HttpListenerResponse = context.Response
+        response.AddHeader("Access-Control-Allow-Origin", "*") ' Allow CORS for development
+        response.AddHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        response.AddHeader("Access-Control-Allow-Headers", "Content-Type")
+
+        If request.HttpMethod = "OPTIONS" Then
+            response.StatusCode = CInt(HttpStatusCode.OK)
+            response.Close()
+            Return
+        End If
+
 
         Try
-            ' Route the request based on the URL path
             Select Case request.Url.AbsolutePath
-                Case "/" ' Serve the index.html file for the root path
+                Case "/"
                     HandleBlockchainPageRequest(response)
-                Case "/mempool" ' Serve the index.html file for the root path
+                Case "/mempool"
                     HandleMempoolPageRequest(response)
                 Case "/styles.css"
                     HandleStaticFileRequest(response, "webpage/styles.css", "text/css")
@@ -40,56 +49,93 @@ Public Class RequestHandler
                     HandleGetTokensOwnedRequest(request, response)
                 Case "/api/get_transaction_history"
                     HandleGetTransactionHistoryRequest(request, response)
-                Case "/api/transaction"
-                    HandleTransactionTrackingRequest(request, response)
+                Case "/api/transaction" ' Renamed from /api/get_transaction_by_hash for clarity
+                    HandleGetTransactionByTxIdRequest(request, response) ' Changed handler name
                 Case "/api/get_token_names"
                     HandleGetTokenNamesRequest(request, response)
-                Case "/api/get_transaction_by_hash"
-                    HandleGetTransactionByHashRequest(request, response)
                 Case "/api/validate_public_key"
                     HandleValidatePublicKeyRequest(request, response)
-                Case "/api/get_mempool" ' New case for getting mempool transactions
+                Case "/api/get_mempool"
                     HandleGetMempoolRequest(request, response)
+                Case "/api/get_latest_block"
+                    HandleGetLatestBlockRequest(request, response)
+                Case "/api/get_difficulty"
+                    HandleGetDifficultyRequest(request, response)
                 Case Else
                     HandleNotFoundRequest(response)
             End Select
         Catch ex As Exception
-            HandleErrorResponse(response, 500, $"An unexpected error occurred: {ex.Message}")
+            HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"An unexpected error occurred: {ex.Message}")
         End Try
+    End Sub
+    Private Sub HandleGetDifficultyRequest(request As HttpListenerRequest, response As HttpListenerResponse)
+        If request.HttpMethod = "GET" Then
+            Try
+                Dim difficulty = blockchain._difficulty
+                SendJsonResponse(response, HttpStatusCode.OK, New With {.difficulty = difficulty})
+            Catch ex As Exception
+                HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"Error getting difficulty: {ex.Message}")
+            End Try
+        Else
+            HandleErrorResponse(response, HttpStatusCode.MethodNotAllowed, "Method Not Allowed")
+        End If
+    End Sub
+
+
+    Private Sub HandleGetLatestBlockRequest(request As HttpListenerRequest, response As HttpListenerResponse)
+        If request.HttpMethod = "GET" Then
+            Try
+                Dim latestBlock = blockchain.GetLatestBlock()
+                If latestBlock IsNot Nothing Then
+                    SendJsonResponse(response, HttpStatusCode.OK, latestBlock)
+                Else
+                    HandleErrorResponse(response, HttpStatusCode.NotFound, "Blockchain is empty or no latest block found.")
+                End If
+            Catch ex As Exception
+                HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"Error getting latest block: {ex.Message}")
+            End Try
+        Else
+            HandleErrorResponse(response, HttpStatusCode.MethodNotAllowed, "Method Not Allowed")
+        End If
+    End Sub
+    Private Sub SendJsonResponse(response As HttpListenerResponse, statusCode As HttpStatusCode, data As Object)
+        response.StatusCode = CInt(statusCode)
+        response.ContentType = "application/json"
+        Dim jsonResponse = JsonConvert.SerializeObject(data)
+        Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
+        response.ContentLength64 = buffer.Length
+        Using output As System.IO.Stream = response.OutputStream
+            output.Write(buffer, 0, buffer.Length)
+        End Using
     End Sub
 
     Private Sub HandleStaticFileRequest(response As HttpListenerResponse, filePath As String, contentType As String)
         Try
-            ' Load the static file
-            Dim fileContent As String = File.ReadAllText(filePath)
-
-            ' Set the response status code and content type
-            response.StatusCode = 200
-            response.ContentType = contentType
-
-            ' Write the response
-            Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(fileContent)
-            response.ContentLength64 = buffer.Length
-            Using output As System.IO.Stream = response.OutputStream
-                output.Write(buffer, 0, buffer.Length)
-            End Using
+            If File.Exists(filePath) Then
+                Dim fileContent As String = File.ReadAllText(filePath)
+                response.StatusCode = CInt(HttpStatusCode.OK)
+                response.ContentType = contentType
+                Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(fileContent)
+                response.ContentLength64 = buffer.Length
+                Using output As System.IO.Stream = response.OutputStream
+                    output.Write(buffer, 0, buffer.Length)
+                End Using
+            Else
+                HandleErrorResponse(response, HttpStatusCode.NotFound, $"File not found: {filePath}")
+            End If
         Catch ex As Exception
-            HandleErrorResponse(response, 500, $"Error loading file {filePath}: {ex.Message}")
+            HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"Error loading file {filePath}: {ex.Message}")
         End Try
     End Sub
 
     Private Sub HandleNotFoundRequest(response As HttpListenerResponse)
-        HandleErrorResponse(response, 404, "Not Found")
+        HandleErrorResponse(response, HttpStatusCode.NotFound, "Not Found")
     End Sub
 
-    Private Sub HandleErrorResponse(response As HttpListenerResponse, statusCode As Integer, message As String)
-        ' Set the response status code and content type
-        response.StatusCode = statusCode
+    Private Sub HandleErrorResponse(response As HttpListenerResponse, statusCode As HttpStatusCode, message As String)
+        response.StatusCode = CInt(statusCode)
         response.ContentType = "application/json"
-        ' Write the response
-        Dim responseObject = New With {
-            .error = message
-        }
+        Dim responseObject = New With {.error = message}
         Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
         Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
         response.ContentLength64 = buffer.Length
@@ -99,219 +145,68 @@ Public Class RequestHandler
     End Sub
 
     Private Sub HandleBlockchainPageRequest(response As HttpListenerResponse)
-        Try
-            ' Load the index.html file
-            Dim htmlContent As String = File.ReadAllText("webpage/blockchain.html") ' Replace with the actual path to your index.html
-
-            ' Set the response status code and content type
-            response.StatusCode = 200
-            response.ContentType = "text/html"
-
-            ' Write the response
-            Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(htmlContent)
-            response.ContentLength64 = buffer.Length
-            Using output As System.IO.Stream = response.OutputStream
-                output.Write(buffer, 0, buffer.Length)
-            End Using
-        Catch ex As Exception
-            HandleErrorResponse(response, 500, $"Error loading home page: {ex.Message}")
-        End Try
+        HandleStaticFileRequest(response, "webpage/blockchain.html", "text/html")
     End Sub
 
     Private Sub HandleMempoolPageRequest(response As HttpListenerResponse)
-        Try
-            ' Load the index.html file
-            Dim htmlContent As String = File.ReadAllText("webpage/mempool.html") ' Replace with the actual path to your index.html
-
-            ' Set the response status code and content type
-            response.StatusCode = 200
-            response.ContentType = "text/html"
-
-            ' Write the response
-            Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(htmlContent)
-            response.ContentLength64 = buffer.Length
-            Using output As System.IO.Stream = response.OutputStream
-                output.Write(buffer, 0, buffer.Length)
-            End Using
-        Catch ex As Exception
-            HandleErrorResponse(response, 500, $"Error loading home page: {ex.Message}")
-        End Try
+        HandleStaticFileRequest(response, "webpage/mempool.html", "text/html")
     End Sub
 
-    Private Sub HandleGetTransactionByHashRequest(request As HttpListenerRequest, response As HttpListenerResponse)
+    Private Sub HandleGetTransactionByTxIdRequest(request As HttpListenerRequest, response As HttpListenerResponse)
         If request.HttpMethod = "GET" Then
             Try
-                Dim hash As String = request.QueryString("hash")
-
-                If String.IsNullOrEmpty(hash) Then
-                    HandleErrorResponse(response, 400, "Missing hash parameter")
+                Dim txId As String = request.QueryString("id")
+                If String.IsNullOrEmpty(txId) Then
+                    HandleErrorResponse(response, HttpStatusCode.BadRequest, "Missing txId parameter")
                     Return
                 End If
 
-                Dim transaction = blockchain.GetTransactionByHash(hash)
-
-                If transaction Is Nothing Then
-                    HandleErrorResponse(response, 404, $"Transaction with hash {hash} not found")
+                Dim transactionInfo = blockchain.GetTransactionByTxId(txId)
+                If transactionInfo Is Nothing Then
+                    HandleErrorResponse(response, HttpStatusCode.NotFound, $"Transaction with txId {txId} not found")
                     Return
                 End If
-
-                ' Set the response status code and content type
-                response.StatusCode = 200
-                response.ContentType = "application/json"
-
-                ' Write the response
-                Dim responseObject = New With {
-                .transaction = transaction
-            }
-                Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
-                Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
-                response.ContentLength64 = buffer.Length
-                Using output As System.IO.Stream = response.OutputStream
-                    output.Write(buffer, 0, buffer.Length)
-                End Using
+                SendJsonResponse(response, HttpStatusCode.OK, transactionInfo)
             Catch ex As Exception
-                HandleErrorResponse(response, 500, $"Error getting transaction by hash: {ex.Message}")
+                HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"Error getting transaction by txId: {ex.Message}")
             End Try
         Else
-            HandleErrorResponse(response, 405, "Method Not Allowed")
+            HandleErrorResponse(response, HttpStatusCode.MethodNotAllowed, "Method Not Allowed")
         End If
     End Sub
-
 
     Private Sub HandleGetTokenNamesRequest(request As HttpListenerRequest, response As HttpListenerResponse)
         If request.HttpMethod = "GET" Then
             Try
-                ' Get the token names from the blockchain
                 Dim tokenNames As Dictionary(Of String, String) = blockchain.GetTokenNames()
-
-                ' Set the response status code and content type
-                response.StatusCode = 200
-                response.ContentType = "application/json"
-
-                ' Create a list to hold the token name objects
                 Dim tokenList As New List(Of JObject)
                 For Each kvp In tokenNames
-                    Dim tokenObject = New JObject()
-                    tokenObject.Add("symbol", kvp.Key)
-                    tokenObject.Add("name", kvp.Value)
-                    tokenList.Add(tokenObject)
+                    tokenList.Add(New JObject From {{"symbol", kvp.Key}, {"name", kvp.Value}})
                 Next
-
-                ' Write the response
-                Dim jsonResponse = JsonConvert.SerializeObject(tokenList) ' Serialize the list
-                Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
-                response.ContentLength64 = buffer.Length
-                Using output As System.IO.Stream = response.OutputStream
-                    output.Write(buffer, 0, buffer.Length)
-                End Using
+                SendJsonResponse(response, HttpStatusCode.OK, tokenList)
             Catch ex As Exception
-                HandleErrorResponse(response, 500, $"Error getting token names: {ex.Message}")
+                HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"Error getting token names: {ex.Message}")
             End Try
         Else
-            HandleErrorResponse(response, 405, "Method Not Allowed")
+            HandleErrorResponse(response, HttpStatusCode.MethodNotAllowed, "Method Not Allowed")
         End If
-    End Sub
-
-    Private Sub HandleTransactionTrackingRequest(request As HttpListenerRequest, response As HttpListenerResponse)
-        If request.HttpMethod = "GET" Then
-            Try
-                ' Get the txId from the query parameters
-                Dim txId As String = request.QueryString("id")
-
-                ' Check if txId is provided
-                If String.IsNullOrEmpty(txId) Then
-                    HandleErrorResponse(response, 400, "id is required")
-                    Return
-                End If
-
-                ' Check mempool first
-                Dim mempoolTransaction As JObject = blockchain._mempool.GetTransactionByTxId(txId)
-                If mempoolTransaction IsNot Nothing Then
-                    ' Transaction found in mempool
-                    Dim transactionData = JObject.Parse(mempoolTransaction("transaction").ToString()) ' Parse transaction data
-                    Dim responseObject = New With {
-                    .status = "pending",
-                    .transaction = transactionData
-                }
-                    Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
-                    SendJsonResponse(response, 200, jsonResponse)
-                    Return
-                End If
-
-                ' If not in mempool, search the blockchain
-                For Each block As Block In blockchain.Chain
-                    For Each transaction As JObject In block.Data
-                        Dim transactionData = JObject.Parse(transaction("transaction").ToString())
-                        If transactionData("txId").ToString() = txId Then
-                            ' Transaction found in blockchain
-                            Dim responseObject = New With {
-                            .status = "completed",
-                            .timestamp = block.Timestamp.ToString("yyyy-MM-dd HH:mm:ss"),
-                            .blockIndex = block.Index,
-                            .blockHash = block.Hash,
-                            .nonce = block.Nonce,
-                            .transaction = transactionData
-                        }
-                            Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
-                            SendJsonResponse(response, 200, jsonResponse)
-                            Return
-                        End If
-                    Next
-                Next
-
-                ' Transaction not found
-                HandleErrorResponse(response, 404, "Transaction not found")
-
-            Catch ex As Exception
-                HandleErrorResponse(response, 500, $"Error tracking transaction: {ex.Message}")
-            End Try
-        Else
-            HandleErrorResponse(response, 405, "Method Not Allowed")
-        End If
-    End Sub
-
-    ' Helper function to send JSON response
-    Private Sub SendJsonResponse(response As HttpListenerResponse, statusCode As Integer, jsonResponse As String)
-        response.StatusCode = statusCode
-        response.ContentType = "application/json"
-        Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
-        response.ContentLength64 = buffer.Length
-        Using output As System.IO.Stream = response.OutputStream
-            output.Write(buffer, 0, buffer.Length)
-        End Using
     End Sub
 
     Private Sub HandleValidatePublicKeyRequest(request As HttpListenerRequest, response As HttpListenerResponse)
         If request.HttpMethod = "GET" Then
             Try
                 Dim publicKey As String = request.QueryString("publicKey")
-
                 If String.IsNullOrEmpty(publicKey) Then
-                    HandleErrorResponse(response, 400, "Missing publicKey parameter")
+                    HandleErrorResponse(response, HttpStatusCode.BadRequest, "Missing publicKey parameter")
                     Return
                 End If
-
                 Dim isValid = Wallet.IsValidPublicKey(publicKey)
-
-                ' Set the response status code and content type
-                response.StatusCode = 200
-                response.ContentType = "application/json"
-
-                ' Write the response
-                Dim responseObject = New With {
-                .isValid = isValid
-            }
-                Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
-                Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
-                response.ContentLength64 = buffer.Length
-                Using output As System.IO.Stream = response.OutputStream
-                    output.Write(buffer, 0, buffer.Length)
-                End Using
+                SendJsonResponse(response, HttpStatusCode.OK, New With {.isValid = isValid})
             Catch ex As Exception
-                HandleErrorResponse(response, 500, $"Error validating public key: {ex.Message}")
+                HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"Error validating public key: {ex.Message}")
             End Try
         Else
-            HandleErrorResponse(response, 405, "Method Not Allowed")
+            HandleErrorResponse(response, HttpStatusCode.MethodNotAllowed, "Method Not Allowed")
         End If
     End Sub
 
@@ -319,140 +214,109 @@ Public Class RequestHandler
         If request.HttpMethod = "GET" Then
             Try
                 ' Set the response status code and content type
-                response.StatusCode = 200
+                response.StatusCode = 200 ' Corrected to use CInt or HttpStatusCode enum
                 response.ContentType = "application/json"
 
                 ' Create the JSON response
-                Dim jsonResponse = JsonConvert.SerializeObject(blockchain.Chain)
+                Dim jsonResponse = JsonConvert.SerializeObject(blockchain.Chain) ' Potential issue here
                 Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
                 response.ContentLength64 = buffer.Length
 
                 ' Print the response in the console
-                'Console.WriteLine("Response: " & jsonResponse)
+                'Console.WriteLine("Response: " & jsonResponse) ' Useful for debugging
 
                 ' Write the response to the output stream
                 Using output As System.IO.Stream = response.OutputStream
                     output.Write(buffer, 0, buffer.Length)
                 End Using
             Catch ex As Exception
-                HandleErrorResponse(response, 500, $"Error getting blockchain: {ex.Message}")
+                HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"Error getting blockchain: {ex.Message}")
             End Try
         Else
-            HandleErrorResponse(response, 405, "Method Not Allowed")
+            HandleErrorResponse(response, HttpStatusCode.MethodNotAllowed, "Method Not Allowed")
         End If
     End Sub
-
 
     Private Sub HandleCheckValidityRequest(request As HttpListenerRequest, response As HttpListenerResponse)
         If request.HttpMethod = "GET" Then
             Try
-                ' Set the response status code and content type
-                response.StatusCode = 200
-                response.ContentType = "application/json"
-
-                ' Write the response
                 Dim isValid = blockchain.IsChainValid()
-                Dim responseObject = New With {
-                    .isValid = isValid
-                }
-                Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
-                Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
-                response.ContentLength64 = buffer.Length
-                Using output As System.IO.Stream = response.OutputStream
-                    output.Write(buffer, 0, buffer.Length)
-                End Using
+                SendJsonResponse(response, HttpStatusCode.OK, New With {.isValid = isValid})
             Catch ex As Exception
-                HandleErrorResponse(response, 500, $"Error checking validity: {ex.Message}")
+                HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"Error checking validity: {ex.Message}")
             End Try
         Else
-            HandleErrorResponse(response, 405, "Method Not Allowed")
+            HandleErrorResponse(response, HttpStatusCode.MethodNotAllowed, "Method Not Allowed")
         End If
     End Sub
 
     Private Sub HandleCreateTokenRequest(request As HttpListenerRequest, response As HttpListenerResponse)
         If request.HttpMethod = "POST" Then
             Try
-                Dim txId As String ' Declare txId here
                 Using reader As New StreamReader(request.InputStream)
                     Dim requestBody As String = reader.ReadToEnd()
                     Dim jsonObject As JObject = JObject.Parse(requestBody)
 
-                    Dim name As String = jsonObject("name").ToString()
-                    Dim symbol As String = jsonObject("symbol").ToString()
-                    Dim initialSupply As Decimal = Decimal.Parse(jsonObject("initialSupply").ToString())
-                    Dim ownerPublicKey As String = jsonObject("ownerPublicKey").ToString()
-                    Dim signature As String = jsonObject("signature").ToString() ' Get the signature
+                    Dim name As String = jsonObject("name")?.ToString()
+                    Dim symbol As String = jsonObject("symbol")?.ToString()
+                    Dim initialSupply As Decimal = jsonObject("initialSupply")?.ToObject(Of Decimal)()
+                    Dim ownerPublicKey As String = jsonObject("ownerPublicKey")?.ToString()
+                    Dim signature As String = jsonObject("signature")?.ToString()
 
-                    txId = blockchain.CreateToken(name, symbol, initialSupply, ownerPublicKey, signature) ' Pass the signature
+                    If String.IsNullOrEmpty(name) OrElse String.IsNullOrEmpty(symbol) OrElse initialSupply < 0 OrElse
+                       String.IsNullOrEmpty(ownerPublicKey) OrElse String.IsNullOrEmpty(signature) Then
+                        HandleErrorResponse(response, HttpStatusCode.BadRequest, "Missing or invalid parameters for token creation.")
+                        Return
+                    End If
 
-                    ' Set the response status code and content type
-                    response.StatusCode = 200
-                    response.ContentType = "application/json"
-
-                    ' Write the response
-                    Dim responseObject = New With {
-                    .message = "Transaction added to mempool successfully!", ' Changed message
-                    .txId = txId ' Include the txId in the response
-                }
-                    Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
-                    Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
-                    response.ContentLength64 = buffer.Length
-                    Using output As System.IO.Stream = response.OutputStream
-                        output.Write(buffer, 0, buffer.Length)
-                    End Using
+                    Dim txId = blockchain.CreateToken(name, symbol, initialSupply, ownerPublicKey, signature)
+                    SendJsonResponse(response, HttpStatusCode.OK, New With {
+                        .message = "Token creation transaction added to mempool.",
+                        .txId = txId
+                    })
                 End Using
+            Catch ex As JsonReaderException
+                HandleErrorResponse(response, HttpStatusCode.BadRequest, $"Invalid JSON format: {ex.Message}")
             Catch ex As Exception
-                HandleErrorResponse(response, 500, $"Error creating token: {ex.Message}")
+                HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"Error creating token: {ex.Message}")
             End Try
         Else
-            HandleErrorResponse(response, 405, "Method Not Allowed")
+            HandleErrorResponse(response, HttpStatusCode.MethodNotAllowed, "Method Not Allowed")
         End If
     End Sub
 
     Private Sub HandleTransferTokensRequest(request As HttpListenerRequest, response As HttpListenerResponse)
         If request.HttpMethod = "POST" Then
             Try
-                Dim txId As String ' Declare txId here
                 Using reader As New StreamReader(request.InputStream)
                     Dim jsonContent = reader.ReadToEnd()
                     Dim jsonObject = JObject.Parse(jsonContent)
 
-                    Dim toAddress As String = jsonObject("toAddress").ToString()
-                    Dim amount As Decimal = jsonObject("amount").ToObject(Of Decimal)()
-                    Dim tokenSymbol As String = jsonObject("tokenSymbol").ToString()
-                    Dim signature As String = jsonObject("signature").ToString()
-                    Dim fromAddressPublicKey As String = jsonObject("fromAddress").ToString() ' Get public key
+                    Dim toAddress As String = jsonObject("toAddress")?.ToString()
+                    Dim amount As Decimal = jsonObject("amount")?.ToObject(Of Decimal)()
+                    Dim tokenSymbol As String = jsonObject("tokenSymbol")?.ToString()
+                    Dim signature As String = jsonObject("signature")?.ToString()
+                    Dim fromAddressPublicKey As String = jsonObject("fromAddress")?.ToString() ' This is the sender's public key
 
-                    ' You might want to add validation here to ensure all required fields are present
+                    If String.IsNullOrEmpty(toAddress) OrElse amount <= 0 OrElse String.IsNullOrEmpty(tokenSymbol) OrElse
+                       String.IsNullOrEmpty(signature) OrElse String.IsNullOrEmpty(fromAddressPublicKey) Then
+                        HandleErrorResponse(response, HttpStatusCode.BadRequest, "Missing or invalid parameters for token transfer.")
+                        Return
+                    End If
 
-                    'blockchain.TransferTokens(toAddress, amount, tokenSymbol, signature, fromAddressPublicKey) ' Pass public key
-                    ' Call TransferTokens and get the txId
-                    txId = blockchain.TransferTokens(toAddress, amount, tokenSymbol, signature, fromAddressPublicKey)
-
+                    Dim txId = blockchain.TransferTokens(toAddress, amount, tokenSymbol, signature, fromAddressPublicKey)
+                    SendJsonResponse(response, HttpStatusCode.OK, New With {
+                        .message = "Token transfer transaction added to mempool.",
+                        .txId = txId
+                    })
                 End Using
-
-                ' Set the response status code and content type
-                response.StatusCode = 200
-                response.ContentType = "application/json"
-
-                ' Write the response
-                Dim responseObject = New With {
-                .message = "Transaction added to mempool successfully!",
-                .txId = txId ' Include the txId in the response
-            }
-                Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
-                Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
-                response.ContentLength64 = buffer.Length
-                Using output As System.IO.Stream = response.OutputStream
-                    output.Write(buffer, 0, buffer.Length)
-                End Using
-
+            Catch ex As JsonReaderException
+                HandleErrorResponse(response, HttpStatusCode.BadRequest, $"Invalid JSON format: {ex.Message}")
             Catch ex As Exception
-                ' Generate the error response here:
-                HandleErrorResponse(response, 500, $"Error transferring tokens: {ex.Message}")
+                HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"Error transferring tokens: {ex.Message}")
             End Try
         Else
-            HandleErrorResponse(response, 405, "Method Not Allowed")
+            HandleErrorResponse(response, HttpStatusCode.MethodNotAllowed, "Method Not Allowed")
         End If
     End Sub
 
@@ -460,34 +324,21 @@ Public Class RequestHandler
         If request.HttpMethod = "GET" Then
             Try
                 Dim address As String = request.QueryString("address")
-
                 If String.IsNullOrEmpty(address) Then
-                    HandleErrorResponse(response, 400, "Missing address parameter")
+                    HandleErrorResponse(response, HttpStatusCode.BadRequest, "Missing address parameter")
                     Return
                 End If
 
                 Dim tokensOwned = blockchain.GetTokensOwned(address)
-
-                ' Set the response status code and content type
-                response.StatusCode = 200
-                response.ContentType = "application/json"
-
-                ' Write the response
-                Dim responseObject = New With {
+                SendJsonResponse(response, HttpStatusCode.OK, New With {
                     .address = address,
                     .tokensOwned = tokensOwned
-                }
-                Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
-                Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
-                response.ContentLength64 = buffer.Length
-                Using output As System.IO.Stream = response.OutputStream
-                    output.Write(buffer, 0, buffer.Length)
-                End Using
+                })
             Catch ex As Exception
-                HandleErrorResponse(response, 500, $"Error getting tokens owned: {ex.Message}")
+                HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"Error getting tokens owned: {ex.Message}")
             End Try
         Else
-            HandleErrorResponse(response, 405, "Method Not Allowed")
+            HandleErrorResponse(response, HttpStatusCode.MethodNotAllowed, "Method Not Allowed")
         End If
     End Sub
 
@@ -495,61 +346,34 @@ Public Class RequestHandler
         If request.HttpMethod = "GET" Then
             Try
                 Dim address As String = request.QueryString("address")
-
                 If String.IsNullOrEmpty(address) Then
-                    HandleErrorResponse(response, 400, "Missing address parameter")
+                    HandleErrorResponse(response, HttpStatusCode.BadRequest, "Missing address parameter")
                     Return
                 End If
 
                 Dim transactions = blockchain.GetTransactionHistory(address)
-
-                ' Set the response status code and content type
-                response.StatusCode = 200
-                response.ContentType = "application/json"
-
-                ' Write the response
-                Dim responseObject = New With {
+                SendJsonResponse(response, HttpStatusCode.OK, New With {
                     .address = address,
                     .transactions = transactions
-                }
-                Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
-                Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
-                response.ContentLength64 = buffer.Length
-                Using output As System.IO.Stream = response.OutputStream
-                    output.Write(buffer, 0, buffer.Length)
-                End Using
+                })
             Catch ex As Exception
-                HandleErrorResponse(response, 500, $"Error getting transaction history: {ex.Message}")
+                HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"Error getting transaction history: {ex.Message}")
             End Try
         Else
-            HandleErrorResponse(response, 405, "Method Not Allowed")
+            HandleErrorResponse(response, HttpStatusCode.MethodNotAllowed, "Method Not Allowed")
         End If
     End Sub
 
     Private Sub HandleGetMempoolRequest(request As HttpListenerRequest, response As HttpListenerResponse)
         If request.HttpMethod = "GET" Then
             Try
-                ' Get the mempool transactions from the blockchain
                 Dim mempoolTransactions As List(Of JObject) = blockchain._mempool.GetTransactions()
-
-                ' Set the response status code and content type
-                response.StatusCode = 200
-                response.ContentType = "application/json"
-
-                ' Write the response
-                Dim jsonResponse = JsonConvert.SerializeObject(mempoolTransactions)
-                Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
-                response.ContentLength64 = buffer.Length
-                Using output As System.IO.Stream = response.OutputStream
-                    output.Write(buffer, 0, buffer.Length)
-                End Using
+                SendJsonResponse(response, HttpStatusCode.OK, mempoolTransactions)
             Catch ex As Exception
-                HandleErrorResponse(response, 500, $"Error getting mempool transactions: {ex.Message}")
+                HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"Error getting mempool transactions: {ex.Message}")
             End Try
         Else
-            HandleErrorResponse(response, 405, "Method Not Allowed")
+            HandleErrorResponse(response, HttpStatusCode.MethodNotAllowed, "Method Not Allowed")
         End If
     End Sub
-
-
 End Class

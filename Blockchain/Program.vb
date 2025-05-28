@@ -1,38 +1,47 @@
 Imports System.Net
-Imports System.Net.NetworkInformation
-Imports System.Net.Sockets
 Imports System.Threading
-
 
 Module Program
 
     Private blockchain As Blockchain
-
-    Private _validation As Validation
+    Private webServer As WebServer
+    Private miningServer As MiningServer
 
     Sub Main()
+        Console.WriteLine("Starting Blockchain Node...")
         Try
-            ' Initialize the blockchain
             blockchain = New Blockchain("blockchain.db")
-            ' Start the API server
-            Dim server As New WebServer(blockchain)
-            server.Start()
-            '_validation.StartValidationThread()
-            Dim miningServer As New MiningServer(8081, blockchain)
-            miningServer.Start()
+            Console.WriteLine("Blockchain initialized.")
 
-            ' Wait for user input to stop the server
-            Console.WriteLine("Press Enter to stop the server...")
+            webServer = New WebServer(blockchain)
+            webServer.Start()
+            Console.WriteLine("Web server initialization attempted.")
+
+            miningServer = New MiningServer(8081, blockchain) ' Port for miners
+            miningServer.Start()
+            Console.WriteLine("Mining server initialization attempted.")
+
+
+            Console.WriteLine("Node components started. Press Enter to stop.")
             Console.ReadLine()
 
-            miningServer.Kill()
-            '_validation.StopValidationThread()
-            ' Stop the API server gracefully
-            server.Kill()
-
-
         Catch ex As Exception
-            Console.WriteLine($"Error: {ex.Message}")
+            Console.WriteLine($"Critical error during startup: {ex.Message}{vbCrLf}{ex.StackTrace}")
+            Console.WriteLine("Application will exit.")
+            Console.ReadLine() ' Keep console open to see error
+            Return
+        Finally
+            Console.WriteLine("Shutting down...")
+            If miningServer IsNot Nothing Then
+                Console.WriteLine("Stopping Mining Server...")
+                miningServer.Kill()
+            End If
+            If webServer IsNot Nothing Then
+                Console.WriteLine("Stopping Web Server...")
+                webServer.Kill()
+            End If
+            Console.WriteLine("Shutdown complete. Press Enter to exit application.")
+            Console.ReadLine()
         End Try
     End Sub
 
