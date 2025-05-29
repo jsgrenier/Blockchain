@@ -5,7 +5,7 @@ Imports Org.BouncyCastle.Crypto
 Imports Org.BouncyCastle.Crypto.EC
 Imports Org.BouncyCastle.Crypto.Parameters
 Imports Org.BouncyCastle.Security
-Imports Org.BouncyCastle.Math.EC ' For ECPoint.IsValid
+Imports Org.BouncyCastle.Math.EC
 
 Public Class Wallet
 
@@ -19,7 +19,7 @@ Public Class Wallet
             Dim q As Org.BouncyCastle.Math.EC.ECPoint = _domainParams.Curve.DecodePoint(publicKeyBytes)
             Dim keyParameters As New ECPublicKeyParameters(q, _domainParams)
 
-            Dim signer As ISigner = SignerUtilities.GetSigner("SHA-256withECDSA") ' Explicitly SHA-256
+            Dim signer As ISigner = SignerUtilities.GetSigner("SHA-256withECDSA")
             signer.Init(False, keyParameters)
 
             Dim messageBytes As Byte() = Encoding.UTF8.GetBytes(message)
@@ -40,12 +40,9 @@ Public Class Wallet
     Public Shared Function IsValidPublicKey(publicKeyBase64 As String) As Boolean
         Try
             Dim publicKeyBytes As Byte() = Convert.FromBase64String(publicKeyBase64)
-            ' Attempt to decode the point. If it fails, it's not valid for the curve.
             Dim point As Org.BouncyCastle.Math.EC.ECPoint = _domainParams.Curve.DecodePoint(publicKeyBytes)
-            ' Check if the point is on the curve and not the point at infinity
             Return point IsNot Nothing AndAlso Not point.IsInfinity AndAlso point.IsValid()
         Catch ex As Exception
-            ' Any exception during decoding or validation means it's not a valid key format for this curve.
             Console.WriteLine($"Public key validation error: {ex.Message} for key starting with {publicKeyBase64.Substring(0, Math.Min(10, publicKeyBase64.Length))}...")
             Return False
         End Try
@@ -55,7 +52,6 @@ Public Class Wallet
         Using sha256 As SHA256 = SHA256.Create()
             Dim inputBytes As Byte() = Encoding.UTF8.GetBytes(input)
             Dim hashBytes As Byte() = sha256.ComputeHash(inputBytes)
-            ' Using ToLower() is conventional for hex strings.
             Return Convert.ToHexString(hashBytes).ToLower()
         End Using
     End Function

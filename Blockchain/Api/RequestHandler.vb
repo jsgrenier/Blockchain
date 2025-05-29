@@ -49,8 +49,8 @@ Public Class RequestHandler
                     HandleGetTokensOwnedRequest(request, response)
                 Case "/api/get_transaction_history"
                     HandleGetTransactionHistoryRequest(request, response)
-                Case "/api/transaction" ' Renamed from /api/get_transaction_by_hash for clarity
-                    HandleGetTransactionByTxIdRequest(request, response) ' Changed handler name
+                Case "/api/transaction"
+                    HandleGetTransactionByTxIdRequest(request, response)
                 Case "/api/get_token_names"
                     HandleGetTokenNamesRequest(request, response)
                 Case "/api/validate_public_key"
@@ -61,11 +61,21 @@ Public Class RequestHandler
                     HandleGetLatestBlockRequest(request, response)
                 Case "/api/get_difficulty"
                     HandleGetDifficultyRequest(request, response)
+                Case "/api/block" ' New endpoint for getting a single block by hash
+                    HandleGetBlockByHashRequest(request, response)
                 Case Else
                     HandleNotFoundRequest(response)
             End Select
         Catch ex As Exception
             HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"An unexpected error occurred: {ex.Message}")
+        Finally
+            If response IsNot Nothing AndAlso response.OutputStream.CanWrite Then ' Check if response still open
+                Try
+                    response.Close()
+                Catch
+                    ' Suppress final close error if already closed or errored out
+                End Try
+            End If
         End Try
     End Sub
     Private Sub HandleGetDifficultyRequest(request As HttpListenerRequest, response As HttpListenerResponse)
@@ -98,6 +108,31 @@ Public Class RequestHandler
             HandleErrorResponse(response, HttpStatusCode.MethodNotAllowed, "Method Not Allowed")
         End If
     End Sub
+
+    Private Sub HandleGetBlockByHashRequest(request As HttpListenerRequest, response As HttpListenerResponse)
+        If request.HttpMethod = "GET" Then
+            Try
+                Dim blockHash As String = request.QueryString("hash")
+                If String.IsNullOrEmpty(blockHash) Then
+                    HandleErrorResponse(response, HttpStatusCode.BadRequest, "Missing block hash parameter")
+                    Return
+                End If
+
+                Dim foundBlock As Block = blockchain.Chain.FirstOrDefault(Function(b) b.Hash = blockHash)
+
+                If foundBlock Is Nothing Then
+                    HandleErrorResponse(response, HttpStatusCode.NotFound, $"Block with hash {blockHash} not found")
+                    Return
+                End If
+                SendJsonResponse(response, HttpStatusCode.OK, foundBlock)
+            Catch ex As Exception
+                HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"Error getting block by hash: {ex.Message}")
+            End Try
+        Else
+            HandleErrorResponse(response, HttpStatusCode.MethodNotAllowed, "Method Not Allowed")
+        End If
+    End Sub
+
     Private Sub SendJsonResponse(response As HttpListenerResponse, statusCode As HttpStatusCode, data As Object)
         response.StatusCode = CInt(statusCode)
         response.ContentType = "application/json"
@@ -112,13 +147,12 @@ Public Class RequestHandler
     Private Sub HandleStaticFileRequest(response As HttpListenerResponse, filePath As String, contentType As String)
         Try
             If File.Exists(filePath) Then
-                Dim fileContent As String = File.ReadAllText(filePath)
+                Dim fileBytes As Byte() = File.ReadAllBytes(filePath) ' Read as bytes for any file type
                 response.StatusCode = CInt(HttpStatusCode.OK)
                 response.ContentType = contentType
-                Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(fileContent)
-                response.ContentLength64 = buffer.Length
+                response.ContentLength64 = fileBytes.Length
                 Using output As System.IO.Stream = response.OutputStream
-                    output.Write(buffer, 0, buffer.Length)
+                    output.Write(fileBytes, 0, fileBytes.Length)
                 End Using
             Else
                 HandleErrorResponse(response, HttpStatusCode.NotFound, $"File not found: {filePath}")
@@ -133,15 +167,23 @@ Public Class RequestHandler
     End Sub
 
     Private Sub HandleErrorResponse(response As HttpListenerResponse, statusCode As HttpStatusCode, message As String)
-        response.StatusCode = CInt(statusCode)
-        response.ContentType = "application/json"
-        Dim responseObject = New With {.error = message}
-        Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
-        Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
-        response.ContentLength64 = buffer.Length
-        Using output As System.IO.Stream = response.OutputStream
-            output.Write(buffer, 0, buffer.Length)
-        End Using
+        Try
+            If response.OutputStream.CanWrite Then
+                response.StatusCode = CInt(statusCode)
+                response.ContentType = "application/json"
+                Dim responseObject = New With {.error = message}
+                Dim jsonResponse = JsonConvert.SerializeObject(responseObject)
+                Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
+                response.ContentLength64 = buffer.Length
+                Using output As System.IO.Stream = response.OutputStream
+                    output.Write(buffer, 0, buffer.Length)
+                End Using
+            Else
+                Console.WriteLine($"ErrorResponse: Cannot write to output stream. Status: {statusCode}, Msg: {message}")
+            End If
+        Catch ex As Exception
+            Console.WriteLine($"ErrorResponse: Further error while sending error response: {ex.Message}")
+        End Try
     End Sub
 
     Private Sub HandleBlockchainPageRequest(response As HttpListenerResponse)
@@ -213,22 +255,48 @@ Public Class RequestHandler
     Private Sub HandleGetBlockchainRequest(request As HttpListenerRequest, response As HttpListenerResponse)
         If request.HttpMethod = "GET" Then
             Try
-                ' Set the response status code and content type
-                response.StatusCode = 200 ' Corrected to use CInt or HttpStatusCode enum
-                response.ContentType = "application/json"
+                Dim pageParam As String = request.QueryString("page")
+                Dim limitParam As String = request.QueryString("limit")
+                Dim sortOrderParam As String = request.QueryString("sortOrder")
 
-                ' Create the JSON response
-                Dim jsonResponse = JsonConvert.SerializeObject(blockchain.Chain) ' Potential issue here
-                Dim buffer As Byte() = System.Text.Encoding.UTF8.GetBytes(jsonResponse)
-                response.ContentLength64 = buffer.Length
+                Dim page As Integer = 1
+                If Not String.IsNullOrEmpty(pageParam) AndAlso Integer.TryParse(pageParam, page) Then
+                    If page < 1 Then page = 1
+                End If
 
-                ' Print the response in the console
-                'Console.WriteLine("Response: " & jsonResponse) ' Useful for debugging
+                Dim limit As Integer = 10 ' Default limit
+                If Not String.IsNullOrEmpty(limitParam) AndAlso Integer.TryParse(limitParam, limit) Then
+                    If limit < 1 Then limit = 1
+                    If limit > 100 Then limit = 100 ' Max limit to prevent abuse
+                End If
 
-                ' Write the response to the output stream
-                Using output As System.IO.Stream = response.OutputStream
-                    output.Write(buffer, 0, buffer.Length)
-                End Using
+                Dim sortDescending As Boolean = True ' Default to descending by index
+                If Not String.IsNullOrEmpty(sortOrderParam) AndAlso sortOrderParam.ToLowerInvariant() = "asc" Then
+                    sortDescending = False
+                End If
+
+                Dim fullChainView As IReadOnlyList(Of Block) = blockchain.Chain ' Assuming Chain is List(Of Block)
+                Dim totalBlocks As Integer = fullChainView.Count
+                Dim pagedBlocks As List(Of Block)
+
+                Dim orderedChain As IEnumerable(Of Block)
+                If sortDescending Then
+                    orderedChain = fullChainView.OrderByDescending(Function(b) b.Index)
+                Else
+                    orderedChain = fullChainView.OrderBy(Function(b) b.Index)
+                End If
+
+                pagedBlocks = orderedChain.Skip((page - 1) * limit).Take(limit).ToList()
+
+                Dim responseObject = New With {
+                    .totalBlocks = totalBlocks,
+                    .page = page,
+                    .limit = limit,
+                    .totalPages = If(totalBlocks = 0, 0, Math.Ceiling(CDbl(totalBlocks) / limit)),
+                    .data = pagedBlocks
+                }
+                SendJsonResponse(response, HttpStatusCode.OK, responseObject)
+
             Catch ex As Exception
                 HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"Error getting blockchain: {ex.Message}")
             End Try
@@ -296,7 +364,7 @@ Public Class RequestHandler
                     Dim amount As Decimal = jsonObject("amount")?.ToObject(Of Decimal)()
                     Dim tokenSymbol As String = jsonObject("tokenSymbol")?.ToString()
                     Dim signature As String = jsonObject("signature")?.ToString()
-                    Dim fromAddressPublicKey As String = jsonObject("fromAddress")?.ToString() ' This is the sender's public key
+                    Dim fromAddressPublicKey As String = jsonObject("fromAddress")?.ToString()
 
                     If String.IsNullOrEmpty(toAddress) OrElse amount <= 0 OrElse String.IsNullOrEmpty(tokenSymbol) OrElse
                        String.IsNullOrEmpty(signature) OrElse String.IsNullOrEmpty(fromAddressPublicKey) Then

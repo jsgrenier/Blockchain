@@ -17,12 +17,10 @@ Public Class WebServer
     Public Sub Start()
         Try
             server = New HttpListener()
-            ' More robust prefix handling
             Dim prefixes As New List(Of String) From {
                 "http://localhost:8080/",
                 "http://127.0.0.1:8080/"
             }
-            ' Attempt to add local network IP if possible (might require admin or firewall config)
             Dim localIp = GetLocalIPAddress()
             If localIp <> "localhost" AndAlso localIp <> "127.0.0.1" Then
                 prefixes.Add($"http://{localIp}:8080/")
@@ -73,7 +71,7 @@ Public Class WebServer
                 Console.WriteLine("Waiting for API request handler thread to finish...")
                 If Not listenerThread.Join(TimeSpan.FromSeconds(5)) Then ' Wait for 5 seconds
                     Console.WriteLine("API request handler thread did not finish in time. Aborting.")
-                    listenerThread.Interrupt() ' Or Abort() if necessary, though Interrupt is gentler
+                    listenerThread.Interrupt()
                 End If
             End If
 
@@ -98,9 +96,6 @@ Public Class WebServer
                                  Catch exTask As Exception
                                      Console.WriteLine($"Error processing request in task for {currentContext.Request.Url}: {exTask.Message}")
                                      Try
-                                         ' Check if response can still be sent.
-                                         ' A simple check: if StatusCode is still the default (200) and no content length set (or default -1),
-                                         ' it's likely nothing has been sent. This isn't foolproof.
                                          If currentContext IsNot Nothing AndAlso
                                             currentContext.Response.StatusCode = CInt(HttpStatusCode.OK) AndAlso
                                             currentContext.Response.ContentLength64 = -1 AndAlso
@@ -128,7 +123,10 @@ Public Class WebServer
 
                 Catch exHttp As HttpListenerException
                     If IsRunning Then
-                        Console.WriteLine($"HttpListenerException in request loop (Code {exHttp.ErrorCode}): {exHttp.Message}")
+                        ' ErrorCode 995 is "Operation Aborted", common during graceful shutdown
+                        If exHttp.ErrorCode <> 995 Then
+                            Console.WriteLine($"HttpListenerException in request loop (Code {exHttp.ErrorCode}): {exHttp.Message}")
+                        End If
                     End If
                 End Try
             End While
