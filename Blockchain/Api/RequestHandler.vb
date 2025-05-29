@@ -13,14 +13,26 @@ Public Class RequestHandler
 
     Public Sub HandleRequest(context As HttpListenerContext)
         Dim request As HttpListenerRequest = context.Request
-        Dim response As HttpListenerResponse = context.Response
-        response.AddHeader("Access-Control-Allow-Origin", "*") ' Allow CORS for development
+        Dim response As HttpListenerResponse = context.Response ' Get the response object from the passed context
+        response.AddHeader("Access-Control-Allow-Origin", "*")
         response.AddHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         response.AddHeader("Access-Control-Allow-Headers", "Content-Type")
 
         If request.HttpMethod = "OPTIONS" Then
-            response.StatusCode = CInt(HttpStatusCode.OK)
-            response.Close()
+            Try
+                response.StatusCode = CInt(HttpStatusCode.OK)
+                ' No body needed for OPTIONS preflight
+            Catch ex As Exception
+                Console.WriteLine($"RequestHandler: Error setting OPTIONS status code: {ex.Message}")
+                ' Avoid further operations on response if this fails
+                Return
+            Finally
+                Try
+                    response.Close() ' Always close after handling OPTIONS
+                Catch exClose As Exception
+                    Console.WriteLine($"RequestHandler: Error closing response after OPTIONS: {exClose.Message}")
+                End Try
+            End Try
             Return
         End If
 
@@ -42,40 +54,57 @@ Public Class RequestHandler
                 Case "/api/check_validity"
                     HandleCheckValidityRequest(request, response)
                 Case "/api/create_token"
-                    HandleCreateTokenRequest(request, response)
+                    HandleCreateTokenRequest(request, response) ' POST - Body, not query param for address
                 Case "/api/transfer_tokens"
-                    HandleTransferTokensRequest(request, response)
+                    HandleTransferTokensRequest(request, response) ' POST - Body, not query param for address
                 Case "/api/get_tokens_owned"
-                    HandleGetTokensOwnedRequest(request, response)
+                    HandleGetTokensOwnedRequest(request, response) ' GET - Query param 'address' - NEEDS DECODE
                 Case "/api/get_transaction_history"
-                    HandleGetTransactionHistoryRequest(request, response)
+                    HandleGetTransactionHistoryRequest(request, response) ' GET - Query param 'address' - NEEDS DECODE
                 Case "/api/transaction"
-                    HandleGetTransactionByTxIdRequest(request, response)
+                    HandleGetTransactionByTxIdRequest(request, response) ' GET - Query param 'id' (txId, usually safe, but good to be aware)
                 Case "/api/get_token_names"
                     HandleGetTokenNamesRequest(request, response)
                 Case "/api/validate_public_key"
-                    HandleValidatePublicKeyRequest(request, response)
+                    HandleValidatePublicKeyRequest(request, response) ' GET - Query param 'publicKey' - NEEDS DECODE
                 Case "/api/get_mempool"
                     HandleGetMempoolRequest(request, response)
                 Case "/api/get_latest_block"
                     HandleGetLatestBlockRequest(request, response)
                 Case "/api/get_difficulty"
                     HandleGetDifficultyRequest(request, response)
-                Case "/api/block" ' New endpoint for getting a single block by hash
-                    HandleGetBlockByHashRequest(request, response)
+                Case "/api/block"
+                    HandleGetBlockByHashRequest(request, response) ' GET - Query param 'hash' (block hash, usually safe)
                 Case Else
                     HandleNotFoundRequest(response)
             End Select
         Catch ex As Exception
-            HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"An unexpected error occurred: {ex.Message}")
+            ' This is for exceptions *during* endpoint handling
+            Console.WriteLine($"RequestHandler: Error during endpoint processing for {request.Url}: {ex.Message}{vbCrLf}{ex.StackTrace}")
+            Try
+                ' Attempt to send an error response if possible
+                HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"Error processing request: {ex.Message}")
+            Catch exHandler As Exception
+                Console.WriteLine($"RequestHandler: Critical error trying to send error response: {exHandler.Message}")
+                ' At this point, the response might be too far gone.
+            End Try
         Finally
-            If response IsNot Nothing AndAlso response.OutputStream.CanWrite Then ' Check if response still open
-                Try
+            ' This is the primary place to ensure the response is closed.
+            ' It will be called after successful processing or after the Catch block.
+            Try
+                ' Check if it's still possible to close (e.g., not already closed by HandleErrorResponse)
+                ' A simple check like CanWrite might not be enough if it was closed *after* last write.
+                ' HttpListenerResponse doesn't have an IsClosed property.
+                ' We rely on the fact that Close() on an already closed response is often a no-op or throws an ignorable error.
+                If response IsNot Nothing Then
                     response.Close()
-                Catch
-                    ' Suppress final close error if already closed or errored out
-                End Try
-            End If
+                End If
+            Catch exClose As ObjectDisposedException
+                ' This is expected if HandleErrorResponse or an earlier part of Finally already closed it.
+                ' Console.WriteLine($"RequestHandler FinalClose: Response already disposed (expected in some error paths).")
+            Catch exClose As Exception
+                Console.WriteLine($"RequestHandler: Error during final response.Close(): {exClose.Message}")
+            End Try
         End Try
     End Sub
     Private Sub HandleGetDifficultyRequest(request As HttpListenerRequest, response As HttpListenerResponse)
@@ -112,7 +141,7 @@ Public Class RequestHandler
     Private Sub HandleGetBlockByHashRequest(request As HttpListenerRequest, response As HttpListenerResponse)
         If request.HttpMethod = "GET" Then
             Try
-                Dim blockHash As String = request.QueryString("hash")
+                Dim blockHash As String = request.QueryString("hash") ' Block hashes are typically hex, safe from URL encoding issues
                 If String.IsNullOrEmpty(blockHash) Then
                     HandleErrorResponse(response, HttpStatusCode.BadRequest, "Missing block hash parameter")
                     Return
@@ -197,7 +226,7 @@ Public Class RequestHandler
     Private Sub HandleGetTransactionByTxIdRequest(request As HttpListenerRequest, response As HttpListenerResponse)
         If request.HttpMethod = "GET" Then
             Try
-                Dim txId As String = request.QueryString("id")
+                Dim txId As String = request.QueryString("id") ' TxIDs are typically hex, generally safe.
                 If String.IsNullOrEmpty(txId) Then
                     HandleErrorResponse(response, HttpStatusCode.BadRequest, "Missing txId parameter")
                     Return
@@ -237,12 +266,16 @@ Public Class RequestHandler
     Private Sub HandleValidatePublicKeyRequest(request As HttpListenerRequest, response As HttpListenerResponse)
         If request.HttpMethod = "GET" Then
             Try
-                Dim publicKey As String = request.QueryString("publicKey")
-                If String.IsNullOrEmpty(publicKey) Then
+                Dim encodedPublicKey As String = request.QueryString("publicKey")
+                If String.IsNullOrEmpty(encodedPublicKey) Then
                     HandleErrorResponse(response, HttpStatusCode.BadRequest, "Missing publicKey parameter")
                     Return
                 End If
-                Dim isValid = Wallet.IsValidPublicKey(publicKey)
+
+                ' <<< DECODE PUBLIC KEY >>>
+                Dim publicKey As String = WebUtility.UrlDecode(encodedPublicKey)
+
+                Dim isValid = Wallet.IsValidPublicKey(publicKey) ' Use decoded key
                 SendJsonResponse(response, HttpStatusCode.OK, New With {.isValid = isValid})
             Catch ex As Exception
                 HandleErrorResponse(response, HttpStatusCode.InternalServerError, $"Error validating public key: {ex.Message}")
@@ -328,7 +361,7 @@ Public Class RequestHandler
                     Dim name As String = jsonObject("name")?.ToString()
                     Dim symbol As String = jsonObject("symbol")?.ToString()
                     Dim initialSupply As Decimal = jsonObject("initialSupply")?.ToObject(Of Decimal)()
-                    Dim ownerPublicKey As String = jsonObject("ownerPublicKey")?.ToString()
+                    Dim ownerPublicKey As String = jsonObject("ownerPublicKey")?.ToString() ' From POST body, not URL encoded here
                     Dim signature As String = jsonObject("signature")?.ToString()
 
                     If String.IsNullOrEmpty(name) OrElse String.IsNullOrEmpty(symbol) OrElse initialSupply < 0 OrElse
@@ -360,11 +393,11 @@ Public Class RequestHandler
                     Dim jsonContent = reader.ReadToEnd()
                     Dim jsonObject = JObject.Parse(jsonContent)
 
-                    Dim toAddress As String = jsonObject("toAddress")?.ToString()
+                    Dim toAddress As String = jsonObject("toAddress")?.ToString() ' From POST body
                     Dim amount As Decimal = jsonObject("amount")?.ToObject(Of Decimal)()
                     Dim tokenSymbol As String = jsonObject("tokenSymbol")?.ToString()
                     Dim signature As String = jsonObject("signature")?.ToString()
-                    Dim fromAddressPublicKey As String = jsonObject("fromAddress")?.ToString()
+                    Dim fromAddressPublicKey As String = jsonObject("fromAddress")?.ToString() ' From POST body
 
                     If String.IsNullOrEmpty(toAddress) OrElse amount <= 0 OrElse String.IsNullOrEmpty(tokenSymbol) OrElse
                        String.IsNullOrEmpty(signature) OrElse String.IsNullOrEmpty(fromAddressPublicKey) Then
@@ -391,15 +424,18 @@ Public Class RequestHandler
     Private Sub HandleGetTokensOwnedRequest(request As HttpListenerRequest, response As HttpListenerResponse)
         If request.HttpMethod = "GET" Then
             Try
-                Dim address As String = request.QueryString("address")
-                If String.IsNullOrEmpty(address) Then
+                Dim encodedAddress As String = request.QueryString("address")
+                If String.IsNullOrEmpty(encodedAddress) Then
                     HandleErrorResponse(response, HttpStatusCode.BadRequest, "Missing address parameter")
                     Return
                 End If
 
-                Dim tokensOwned = blockchain.GetTokensOwned(address)
+                ' <<< DECODE ADDRESS >>>
+                Dim address As String = WebUtility.UrlDecode(encodedAddress)
+
+                Dim tokensOwned = blockchain.GetTokensOwned(address) ' Use decoded address
                 SendJsonResponse(response, HttpStatusCode.OK, New With {
-                    .address = address,
+                    .address = address, ' Send back decoded address
                     .tokensOwned = tokensOwned
                 })
             Catch ex As Exception
@@ -413,15 +449,18 @@ Public Class RequestHandler
     Private Sub HandleGetTransactionHistoryRequest(request As HttpListenerRequest, response As HttpListenerResponse)
         If request.HttpMethod = "GET" Then
             Try
-                Dim address As String = request.QueryString("address")
-                If String.IsNullOrEmpty(address) Then
+                Dim encodedAddress As String = request.QueryString("address")
+                If String.IsNullOrEmpty(encodedAddress) Then
                     HandleErrorResponse(response, HttpStatusCode.BadRequest, "Missing address parameter")
                     Return
                 End If
 
-                Dim transactions = blockchain.GetTransactionHistory(address)
+                ' <<< DECODE ADDRESS >>>
+                Dim address As String = WebUtility.UrlDecode(encodedAddress)
+
+                Dim transactions = blockchain.GetTransactionHistory(address) ' Use decoded address
                 SendJsonResponse(response, HttpStatusCode.OK, New With {
-                    .address = address,
+                    .address = address, ' Send back decoded address
                     .transactions = transactions
                 })
             Catch ex As Exception

@@ -8,7 +8,7 @@ Public Class WebServer
     Private blockchain As Blockchain
     Private server As HttpListener
     Private listenerThread As Thread
-    Private IsRunning As Boolean = False ' Added Volatile
+    Private IsRunning As Boolean = False
 
     Public Sub New(ByVal blockchain As Blockchain)
         Me.blockchain = blockchain
@@ -41,7 +41,7 @@ Public Class WebServer
             End If
 
             server.Start()
-            IsRunning = True ' Set IsRunning to true AFTER server has successfully started
+            IsRunning = True
             Console.WriteLine("API server started. Listening on:")
             For Each prefix In server.Prefixes
                 Console.WriteLine(prefix)
@@ -58,20 +58,20 @@ Public Class WebServer
 
     Public Sub Kill()
         Try
-            IsRunning = False ' Signal thread to stop
+            IsRunning = False
 
             If server IsNot Nothing AndAlso server.IsListening Then
                 Console.WriteLine("Stopping API server...")
-                server.Stop() ' Stop listening for new requests
-                server.Close() ' Release resources
+                server.Stop()
+                server.Close()
                 Console.WriteLine("API server stopped.")
             End If
 
             If listenerThread IsNot Nothing AndAlso listenerThread.IsAlive Then
                 Console.WriteLine("Waiting for API request handler thread to finish...")
-                If Not listenerThread.Join(TimeSpan.FromSeconds(5)) Then ' Wait for 5 seconds
+                If Not listenerThread.Join(TimeSpan.FromSeconds(5)) Then
                     Console.WriteLine("API request handler thread did not finish in time. Aborting.")
-                    listenerThread.Interrupt()
+                    listenerThread.Interrupt() ' Consider Thread.Abort() if Interrupt is not effective, but use with caution
                 End If
             End If
 
@@ -86,47 +86,88 @@ Public Class WebServer
             While IsRunning AndAlso (server IsNot Nothing AndAlso server.IsListening)
                 Dim context As HttpListenerContext = Nothing
                 Try
-                    context = server.GetContext()
-                    If Not IsRunning Then Exit While
+                    context = server.GetContext() ' Blocks until a request comes in
+                    If Not IsRunning Then
+                        If context IsNot Nothing Then
+                            ' If server is stopping, abort the request
+                            context.Response.StatusCode = CInt(HttpStatusCode.ServiceUnavailable)
+                            context.Response.Close()
+                        End If
+                        Exit While
+                    End If
+
+                    ' --- Crucial: Capture context for the task ---
+                    Dim capturedContext As HttpListenerContext = context
 
                     Task.Run(Sub()
-                                 Dim currentContext As HttpListenerContext = context ' Capture context for the task
                                  Try
-                                     handler.HandleRequest(currentContext)
+                                     ' Check if the listener is still running and context is valid before processing
+                                     ' This check might be a bit late if context is disposed between GetContext and here,
+                                     ' but it's an attempt to catch some scenarios.
+                                     If IsRunning AndAlso server.IsListening AndAlso capturedContext IsNot Nothing Then
+                                         handler.HandleRequest(capturedContext) ' HandleRequest is now fully responsible for this context
+                                     ElseIf capturedContext IsNot Nothing Then
+                                         ' If server stopped or context became invalid before task could run properly
+                                         Try
+                                             If capturedContext.Response.OutputStream.CanWrite Then ' Check before accessing
+                                                 capturedContext.Response.StatusCode = CInt(HttpStatusCode.ServiceUnavailable)
+                                                 capturedContext.Response.Close()
+                                             End If
+                                         Catch ex As Exception
+                                             ' Likely already disposed, suppress
+                                             Console.WriteLine($"WebServer Task: Error trying to close context for stopped server: {ex.Message}")
+                                         End Try
+                                     End If
                                  Catch exTask As Exception
-                                     Console.WriteLine($"Error processing request in task for {currentContext.Request.Url}: {exTask.Message}")
+                                     ' This catch is for UNEXPECTED exceptions escaping handler.HandleRequest
+                                     ' handler.HandleRequest should ideally handle its own errors and send responses.
+                                     Console.WriteLine($"WebServer Task: Unhandled exception processing request for {capturedContext?.Request?.Url}: {exTask.Message}{vbCrLf}{exTask.StackTrace}")
                                      Try
-                                         If currentContext IsNot Nothing AndAlso
-                                            currentContext.Response.StatusCode = CInt(HttpStatusCode.OK) AndAlso
-                                            currentContext.Response.ContentLength64 = -1 AndAlso
-                                            Not currentContext.Response.SendChunked Then
-
-                                             currentContext.Response.StatusCode = CInt(HttpStatusCode.InternalServerError)
-                                             Dim buffer = System.Text.Encoding.UTF8.GetBytes($"{{""error"":""Internal server error processing request: {exTask.Message.Replace("""", "'")}""}}")
-                                             currentContext.Response.ContentType = "application/json"
-                                             currentContext.Response.ContentLength64 = buffer.Length
-                                             currentContext.Response.OutputStream.Write(buffer, 0, buffer.Length)
+                                         If capturedContext?.Response IsNot Nothing AndAlso capturedContext.Response.OutputStream.CanWrite Then
+                                             capturedContext.Response.StatusCode = CInt(HttpStatusCode.InternalServerError)
+                                             Dim buffer = System.Text.Encoding.UTF8.GetBytes($"{{""error"":""Task Level: Internal server error: {exTask.Message.Replace("""", "'")}""}}")
+                                             capturedContext.Response.ContentType = "application/json"
+                                             capturedContext.Response.ContentLength64 = buffer.Length
+                                             capturedContext.Response.OutputStream.Write(buffer, 0, buffer.Length)
+                                             capturedContext.Response.Close() ' Close it here if we sent the error
                                          End If
-                                     Catch exResponse As Exception
-                                         Console.WriteLine($"Further error trying to send error response: {exResponse.Message}")
-                                     Finally
-                                         If currentContext IsNot Nothing Then
-                                             Try
-                                                 currentContext.Response.Close()
-                                             Catch
-                                                 ' suppress
-                                             End Try
-                                         End If
+                                     Catch exResp As Exception
+                                         Console.WriteLine($"WebServer Task: Further error sending task-level error response: {exResp.Message}")
                                      End Try
                                  End Try
                              End Sub)
+                    context = Nothing ' Release reference to the context in the main loop after dispatching
 
                 Catch exHttp As HttpListenerException
                     If IsRunning Then
-                        ' ErrorCode 995 is "Operation Aborted", common during graceful shutdown
                         If exHttp.ErrorCode <> 995 Then
                             Console.WriteLine($"HttpListenerException in request loop (Code {exHttp.ErrorCode}): {exHttp.Message}")
                         End If
+                    Else
+                        Console.WriteLine($"HttpListenerException (Code {exHttp.ErrorCode}) while shutting down: {exHttp.Message}")
+                    End If
+                    ' If context was obtained but GetContext threw an error, it might need closing
+                    If context IsNot Nothing Then
+                        Try : context.Response.Close() : Catch : End Try
+                        context = Nothing
+                    End If
+                Catch exDisposed As ObjectDisposedException
+                    If IsRunning Then
+                        Console.WriteLine($"ObjectDisposedException in request loop (HttpListener likely disposed): {exDisposed.Message}")
+                    Else
+                        Console.WriteLine($"ObjectDisposedException (HttpListener likely disposed) while shutting down: {exDisposed.Message}")
+                    End If
+                    If context IsNot Nothing Then
+                        Try : context.Response.Close() : Catch : End Try
+                        context = Nothing
+                    End If
+                Catch exGeneric As Exception
+                    If IsRunning Then
+                        Console.WriteLine($"Generic Exception in GetContext loop: {exGeneric.Message}{vbCrLf}{exGeneric.StackTrace}")
+                    End If
+                    If context IsNot Nothing Then
+                        Try : context.Response.Close() : Catch : End Try
+                        context = Nothing
                     End If
                 End Try
             End While
@@ -137,7 +178,7 @@ Public Class WebServer
             Console.WriteLine("API Request handling thread interrupted.")
         Catch ex As Exception
             If IsRunning Then
-                Console.WriteLine($"Unexpected error in API request handling loop: {ex.Message}")
+                Console.WriteLine($"Unexpected error in API request handling loop (outer): {ex.Message}{vbCrLf}{ex.StackTrace}")
             End If
         Finally
             Console.WriteLine("API request handling loop finished.")

@@ -4,12 +4,13 @@ Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
 Imports System.Globalization
 Imports System.Data
+Imports System.Diagnostics ' For Debug.WriteLine if you prefer over Console
 
 Public Class Blockchain
 
     Public Property Chain As List(Of Block)
     Private _dbConnection As SqliteConnection
-    Public Property _difficulty As Integer = 4
+    Public Property _difficulty As Integer = 4 ' Default difficulty
     Public _mempool As New Mempool()
 
     Public Sub New(dbFilePath As String)
@@ -52,7 +53,9 @@ Public Class Blockchain
             Dim command As New SqliteCommand(selectQuery, _dbConnection)
             Using reader As SqliteDataReader = command.ExecuteReader()
                 While reader.Read()
-                    Dim data As List(Of JObject) = JsonConvert.DeserializeObject(Of List(Of JObject))(reader.GetString(2))
+                    Dim dataAsJsonString As String = reader.GetString(2)
+                    Dim data As List(Of JObject) = JsonConvert.DeserializeObject(Of List(Of JObject))(dataAsJsonString)
+
                     Dim timestampString = reader.GetString(1)
                     Dim timestamp As DateTime
                     If Not DateTime.TryParseExact(timestampString, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, timestamp) Then
@@ -88,14 +91,11 @@ Public Class Blockchain
                     Chain.Add(block)
                 End While
             End Using
-            ' Set current difficulty based on the last block loaded, or default if chain is empty
+
             If Chain.Any() Then
-                _difficulty = Chain.Last().Difficulty ' Could also be adjusted for next block, but this is a starting point
-                ' Or, more accurately, if difficulty adjustment logic runs on load, _difficulty would be set.
-                ' For now, let's assume last block's difficulty is a reasonable start for the *next* block.
-                ' The MiningServer.AdjustDifficulty will correct it after new blocks.
+                _difficulty = Chain.Last().Difficulty
             Else
-                _difficulty = 4 ' Initial default difficulty if blockchain is new
+                _difficulty = 4
             End If
 
         Catch ex As Exception
@@ -145,17 +145,18 @@ Public Class Blockchain
             .type = "tokenCreation",
             .name = "Beancoin",
             .symbol = "BEAN",
-            .initialSupply = CObj(0D), ' No premine for BEAN, only through mining
+            .initialSupply = CObj(0D),
             .owner = "genesis",
-            .txId = Guid.NewGuid.ToString("N")
+            .txId = Guid.NewGuid().ToString("N")
         })
 
-        Dim genesisData As New List(Of JObject) From {
-            JObject.FromObject(New With {
-                .transaction = tokenCreationData
-            })
+        Dim genesisTransactionWrapper As New JObject From {
+            {"transaction", tokenCreationData}
         }
-        Dim genesisBlock As New Block(0, DateTime.UtcNow, genesisData, "0", _difficulty) ' Use current _difficulty
+
+        Dim genesisBlockData As New List(Of JObject) From {genesisTransactionWrapper}
+
+        Dim genesisBlock As New Block(0, DateTime.UtcNow, genesisBlockData, "0", _difficulty)
         genesisBlock.Mine()
         Chain.Add(genesisBlock)
         SaveBlockToDatabase(genesisBlock)
@@ -163,7 +164,7 @@ Public Class Blockchain
     End Sub
 
     Public Function GetLatestBlock() As Block
-        If Chain.Count > 0 Then
+        If Chain.Any() Then
             Return Chain.Last()
         End If
         Return Nothing
@@ -171,18 +172,27 @@ Public Class Blockchain
 #End Region
 
 #Region "Mempool"
-    Public Function AddTransactionToMempool(transactionData As String) As String
-        Dim txData As JObject = JObject.Parse(transactionData)
+    Public Function AddTransactionToMempool(transactionJsonString As String) As String
+        Dim txDataAsJObject As JObject
+        Try
+            txDataAsJObject = JObject.Parse(transactionJsonString)
+        Catch ex As JsonReaderException
+            Console.WriteLine($"Error parsing transaction JSON for mempool: {ex.Message}. JSON: {transactionJsonString}")
+            Throw New ArgumentException("Invalid transaction JSON format.", ex)
+        End Try
+
         Dim txId As String
-        If txData.ContainsKey("txId") Then
-            txId = txData("txId").ToString()
+        If txDataAsJObject.ContainsKey("txId") AndAlso txDataAsJObject("txId")?.Type = JTokenType.String Then
+            txId = txDataAsJObject("txId").ToString()
         Else
             txId = Guid.NewGuid().ToString("N")
-            txData.Add("txId", txId)
+            txDataAsJObject.Add("txId", txId)
         End If
 
-        Dim transactionWrapper As New JObject
-        transactionWrapper.Add("transaction", txData)
+        Dim transactionWrapper As New JObject From {
+            {"transaction", txDataAsJObject}
+        }
+
         _mempool.AddTransaction(transactionWrapper)
         Console.WriteLine($"Transaction {txId} added to the mempool.")
         Return txId
@@ -190,43 +200,43 @@ Public Class Blockchain
 #End Region
 
 #Region "POST Actions"
-    Public Function CreateToken(name As String, symbol As String, initialSupply As Decimal, ownerPublicKey As String, signature As String) As String
+    Public Function CreateToken(name As String, symbolText As String, initialSupply As Decimal, ownerPublicKey As String, signature As String) As String
         Try
             If TokenNameExists(name) Then
                 Throw New Exception("A token with this name already exists.")
             End If
-            If TokenSymbolExists(symbol) Then
+            If TokenSymbolExists(symbolText) Then
                 Throw New Exception("A token with this symbol already exists.")
             End If
 
-            Dim dataToSign As String = $"{name}:{symbol}:{initialSupply.ToString(CultureInfo.InvariantCulture)}:{ownerPublicKey}"
+            Dim dataToSign As String = $"{name}:{symbolText}:{initialSupply.ToString(CultureInfo.InvariantCulture)}:{ownerPublicKey}"
             If Not Wallet.VerifySignature(ownerPublicKey, signature, dataToSign) Then
                 Throw New Exception("Invalid signature. Token creation canceled.")
             End If
             Console.WriteLine("Signature verified successfully for token creation.")
 
-            Dim tokenData = JObject.FromObject(New With {
+            Dim tokenTransactionJObject = JObject.FromObject(New With {
                 .timestamp = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
                 .type = "tokenCreation",
                 .name = name,
-                .symbol = symbol,
+                .symbol = symbolText,
                 .initialSupply = initialSupply,
                 .owner = ownerPublicKey,
                 .txId = Guid.NewGuid().ToString("N")
-            }).ToString(Formatting.None)
+            })
 
-            Dim txId As String = AddTransactionToMempool(tokenData)
-            Console.WriteLine($"Token creation transaction {txId} for {symbol} added to the mempool.")
+            Dim txId As String = AddTransactionToMempool(tokenTransactionJObject.ToString(Formatting.None))
+            Console.WriteLine($"Token creation transaction {txId} for {symbolText} added to the mempool.")
             Return txId
         Catch ex As Exception
-            Console.WriteLine($"Error in CreateToken: {ex.Message}")
+            Console.WriteLine($"Error in CreateToken: {ex.Message}{vbCrLf}{ex.StackTrace}")
             Throw
         End Try
     End Function
 
     Public Function TransferTokens(toAddress As String, amount As Decimal, tokenSymbol As String, signature As String, fromAddressPublicKey As String) As String
         Try
-            If fromAddressPublicKey = toAddress Then
+            If String.Equals(fromAddressPublicKey, toAddress, StringComparison.Ordinal) Then
                 Throw New Exception("Cannot transfer tokens to the same address.")
             End If
 
@@ -237,9 +247,9 @@ Public Class Blockchain
             End If
             Console.WriteLine("Signature verified successfully for token transfer.")
 
-            Dim tokenBalances = GetTokensOwned(fromAddressPublicKey) ' Checks chain + mempool for current spendable balance
+            Dim tokenBalances = GetTokensOwned(fromAddressPublicKey)
             If Not tokenBalances.ContainsKey(tokenSymbol) OrElse tokenBalances(tokenSymbol) < amount Then
-                Throw New Exception($"Insufficient balance for token transfer of {amount} {tokenSymbol} from {fromAddressPublicKey}.")
+                Throw New Exception($"Insufficient balance for token transfer of {amount} {tokenSymbol} from {fromAddressPublicKey}. Available: {tokenBalances.GetValueOrDefault(tokenSymbol, 0D)}")
             End If
             Console.WriteLine("Balance check passed for transfer.")
 
@@ -247,7 +257,7 @@ Public Class Blockchain
                 Throw New Exception("Cannot process transaction with zero or negative amount.")
             End If
 
-            Dim transferData = JObject.FromObject(New With {
+            Dim transferTransactionJObject = JObject.FromObject(New With {
                 .timestamp = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
                 .type = "transfer",
                 .from = fromAddressPublicKey,
@@ -255,13 +265,13 @@ Public Class Blockchain
                 .amount = amount,
                 .token = tokenSymbol,
                 .txId = Guid.NewGuid().ToString("N")
-            }).ToString(Formatting.None)
+            })
 
-            Dim txId As String = AddTransactionToMempool(transferData)
+            Dim txId As String = AddTransactionToMempool(transferTransactionJObject.ToString(Formatting.None))
             Console.WriteLine($"Transfer transaction {txId} for {amount} {tokenSymbol} from {fromAddressPublicKey} to {toAddress} added to mempool.")
             Return txId
         Catch ex As Exception
-            Console.WriteLine($"Error in TransferTokens: {ex.Message}")
+            Console.WriteLine($"Error in TransferTokens: {ex.Message}{vbCrLf}{ex.StackTrace}")
             Throw
         End Try
     End Function
@@ -271,63 +281,111 @@ Public Class Blockchain
     Public Function GetTokensOwned(address As String) As Dictionary(Of String, Decimal)
         Dim tokensOwned As New Dictionary(Of String, Decimal)
 
-        For Each block As Block In Chain
+        Dim chainSnapshot As List(Of Block)
+        SyncLock Chain
+            chainSnapshot = Chain.ToList()
+        End SyncLock
+
+        For Each block As Block In chainSnapshot
             For Each transactionWrapper As JObject In block.Data
                 Try
-                    Dim transactionData = JObject.Parse(transactionWrapper("transaction").ToString())
+                    Dim transactionToken As JToken = transactionWrapper("transaction")
+                    If transactionToken Is Nothing OrElse transactionToken.Type <> JTokenType.Object Then
+                        Console.WriteLine($"Warning (GetTokensOwned - Chain): 'transaction' field in block {block.Index} is not a JObject or is null. Wrapper: {transactionWrapper.ToString(Formatting.None)}")
+                        Continue For
+                    End If
+                    Dim transactionData As JObject = CType(transactionToken, JObject)
+
                     Dim txType = transactionData("type")?.ToString()
 
                     If txType = "tokenCreation" Then
                         Dim owner = transactionData("owner")?.ToString()
                         Dim symbol = transactionData("symbol")?.ToString()
-                        Dim initialSupply = transactionData("initialSupply")?.ToObject(Of Decimal)()
-                        If owner = address AndAlso symbol IsNot Nothing Then
+                        Dim initialSupplyToken As JToken = transactionData("initialSupply")
+                        Dim initialSupply As Decimal = 0D
+
+                        If initialSupplyToken IsNot Nothing Then
+                            Try
+                                initialSupply = initialSupplyToken.ToObject(Of Decimal)()
+                            Catch ex As Exception
+                                Console.WriteLine($"Warning (GetTokensOwned - Chain): Could not convert initialSupply JToken '{initialSupplyToken.ToString(Formatting.None)}' to Decimal for tokenCreation. Owner '{owner}', Symbol '{symbol}'. Block {block.Index}. Error: {ex.Message}")
+                                initialSupply = 0D
+                            End Try
+                        End If
+
+                        If String.Equals(owner, address, StringComparison.Ordinal) AndAlso symbol IsNot Nothing AndAlso initialSupply > 0D Then
                             tokensOwned(symbol) = tokensOwned.GetValueOrDefault(symbol, 0D) + initialSupply
                         End If
+
                     ElseIf txType = "transfer" Then
                         Dim from = transactionData("from")?.ToString()
-                        Dim too = transactionData("to")?.ToString()
+                        Dim to_addr = transactionData("to")?.ToString()
                         Dim symbol = transactionData("token")?.ToString()
-                        Dim amountVal = transactionData("amount")?.ToObject(Of Decimal)()
+                        Dim amountValToken As JToken = transactionData("amount")
+                        Dim amountVal As Decimal = 0D
 
-                        If symbol IsNot Nothing Then
-                            If from = address Then
+                        If amountValToken IsNot Nothing Then
+                            Try
+                                amountVal = amountValToken.ToObject(Of Decimal)()
+                            Catch ex As Exception
+                                Console.WriteLine($"Warning (GetTokensOwned - Chain): Could not convert transfer amount JToken '{amountValToken.ToString(Formatting.None)}' to Decimal. From '{from}', To '{to_addr}', Symbol '{symbol}'. Block {block.Index}. Error: {ex.Message}")
+                                amountVal = 0D
+                            End Try
+                        End If
+
+                        If symbol IsNot Nothing AndAlso amountVal > 0D Then
+                            If String.Equals(from, address, StringComparison.Ordinal) Then
                                 tokensOwned(symbol) = tokensOwned.GetValueOrDefault(symbol, 0D) - amountVal
                             End If
-                            If too = address Then
+                            If String.Equals(to_addr, address, StringComparison.Ordinal) Then
                                 tokensOwned(symbol) = tokensOwned.GetValueOrDefault(symbol, 0D) + amountVal
                             End If
                         End If
                     End If
                 Catch ex As Exception
-                    Console.WriteLine($"Error processing chain transaction for balance: {ex.Message} - {transactionWrapper.ToString()}")
+                    Console.WriteLine($"Error processing chain transaction for balance in block {block.Index}: {ex.Message} - Wrapper: {transactionWrapper.ToString(Formatting.None)}, Stack: {ex.StackTrace}")
                 End Try
             Next
         Next
+        'Console.WriteLine($"Tokens owned after chain processing for {address}: {JsonConvert.SerializeObject(tokensOwned)}")
 
-        For Each mempoolTxWrapper As JObject In _mempool.GetTransactions()
+        Dim mempoolSnapshot As List(Of JObject) = _mempool.GetTransactions()
+        For Each mempoolTxWrapper As JObject In mempoolSnapshot
             Try
-                Dim transactionData = JObject.Parse(mempoolTxWrapper("transaction").ToString())
-                Dim txType = transactionData("type")?.ToString()
-                If txType = "transfer" Then ' Only transfers affect balance from mempool perspective for this function
-                    Dim from = transactionData("from")?.ToString()
-                    Dim too = transactionData("to")?.ToString() ' Consider incoming from mempool too for spendable balance
-                    Dim symbol = transactionData("token")?.ToString()
-                    Dim amountVal = transactionData("amount")?.ToObject(Of Decimal)()
+                Dim transactionToken As JToken = mempoolTxWrapper("transaction")
+                If transactionToken Is Nothing OrElse transactionToken.Type <> JTokenType.Object Then
+                    Console.WriteLine($"Warning (GetTokensOwned - Mempool): 'transaction' field is not a JObject or is null. Wrapper: {mempoolTxWrapper.ToString(Formatting.None)}")
+                    Continue For
+                End If
+                Dim transactionData As JObject = CType(transactionToken, JObject)
 
-                    If symbol IsNot Nothing Then
-                        If from = address Then
+                Dim txType = transactionData("type")?.ToString()
+                If txType = "transfer" Then
+                    Dim from = transactionData("from")?.ToString()
+                    Dim symbol = transactionData("token")?.ToString()
+                    Dim amountValToken As JToken = transactionData("amount")
+                    Dim amountVal As Decimal = 0D
+
+                    If amountValToken IsNot Nothing Then
+                        Try
+                            amountVal = amountValToken.ToObject(Of Decimal)()
+                        Catch ex As Exception
+                            Console.WriteLine($"Warning (GetTokensOwned - Mempool): Could not convert transfer amount JToken '{amountValToken.ToString(Formatting.None)}' to Decimal. From '{from}', Symbol '{symbol}'. Error: {ex.Message}")
+                            amountVal = 0D
+                        End Try
+                    End If
+
+                    If symbol IsNot Nothing AndAlso amountVal > 0D Then
+                        If String.Equals(from, address, StringComparison.Ordinal) Then
                             tokensOwned(symbol) = tokensOwned.GetValueOrDefault(symbol, 0D) - amountVal
                         End If
-                        ' For GetTokensOwned, usually we don't count incoming mempool tx as "owned" yet until confirmed.
-                        ' However, for *spendable* balance check before adding to mempool, it might be considered.
-                        ' Sticking to current logic: only outgoing mempool tx reduces "owned" for this query.
                     End If
                 End If
             Catch ex As Exception
-                Console.WriteLine($"Error processing mempool transaction for balance: {ex.Message} - {mempoolTxWrapper.ToString()}")
+                Console.WriteLine($"Error processing mempool transaction for balance: {ex.Message} - Wrapper: {mempoolTxWrapper.ToString(Formatting.None)}, Stack: {ex.StackTrace}")
             End Try
         Next
+        'Console.WriteLine($"Tokens owned after mempool processing for {address}: {JsonConvert.SerializeObject(tokensOwned)}")
 
         Dim keysToRemove = tokensOwned.Where(Function(kvp) kvp.Value <= 0.00000000D).Select(Function(kvp) kvp.Key).ToList()
         For Each key In keysToRemove
@@ -339,36 +397,51 @@ Public Class Blockchain
 
     Public Function GetTransactionHistory(address As String) As List(Of Object)
         Dim historyItems As New List(Of Object)
+        Dim chainSnapshot As List(Of Block)
+        SyncLock Chain
+            chainSnapshot = Chain.ToList()
+        End SyncLock
 
-        For Each block As Block In Chain
+        For Each block As Block In chainSnapshot
             For Each transactionWrapper As JObject In block.Data
                 Try
-                    Dim transactionData = JObject.Parse(transactionWrapper("transaction").ToString())
+                    Dim transactionToken As JToken = transactionWrapper("transaction")
+                    If transactionToken Is Nothing OrElse transactionToken.Type <> JTokenType.Object Then Continue For
+                    Dim transactionData As JObject = CType(transactionToken, JObject)
+
                     Dim blockDateTime = block.Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
                     Dim txType = transactionData("type")?.ToString()
                     Dim txId = transactionData("txId")?.ToString()
-                    Dim txTimestampString = If(transactionData.ContainsKey("timestamp"), transactionData("timestamp").ToString(), block.Timestamp.ToString("o", CultureInfo.InvariantCulture))
+                    Dim txTimestampString = If(transactionData.ContainsKey("timestamp") AndAlso transactionData("timestamp").Type = JTokenType.String,
+                                               transactionData("timestamp").ToString(),
+                                               block.Timestamp.ToString("o", CultureInfo.InvariantCulture))
                     Dim txTimestampDateTime As DateTime
-                    DateTime.TryParseExact(txTimestampString, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, txTimestampDateTime)
+                    If Not DateTime.TryParseExact(txTimestampString, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, txTimestampDateTime) Then
+                        DateTime.TryParse(txTimestampString, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal Or DateTimeStyles.AdjustToUniversal, txTimestampDateTime)
+                    End If
 
 
                     If txType = "transfer" Then
                         Dim from = transactionData("from")?.ToString()
-                        Dim too = transactionData("to")?.ToString()
+                        Dim to_addr = transactionData("to")?.ToString()
                         Dim symbol = transactionData("token")?.ToString()
-                        Dim amountVal = transactionData("amount")?.ToObject(Of Decimal)()
-                        If from = address OrElse too = address Then
-                            Dim itemType = If(from = "miningReward", "Mining Reward", "Transfer")
+                        Dim amountVal As Decimal = 0D
+                        If transactionData("amount") IsNot Nothing Then
+                            Try : amountVal = transactionData("amount").ToObject(Of Decimal)() : Catch : End Try
+                        End If
+
+                        If String.Equals(from, address, StringComparison.Ordinal) OrElse String.Equals(to_addr, address, StringComparison.Ordinal) Then
+                            Dim itemType = If(String.Equals(from, "miningReward", StringComparison.OrdinalIgnoreCase), "Mining Reward", "Transfer")
                             Dim amountString = ""
-                            If from = address Then amountString = $"-{amountVal} {symbol}"
-                            If too = address Then amountString = $"+{amountVal} {symbol}"
-                            If from = "miningReward" AndAlso too = address Then amountString = $"+{amountVal} {symbol}"
+                            If String.Equals(from, address, StringComparison.Ordinal) Then amountString = $"-{amountVal} {symbol}"
+                            If String.Equals(to_addr, address, StringComparison.Ordinal) Then amountString = $"+{amountVal} {symbol}"
+                            If String.Equals(from, "miningReward", StringComparison.OrdinalIgnoreCase) AndAlso String.Equals(to_addr, address, StringComparison.Ordinal) Then amountString = $"+{amountVal} {symbol}"
 
 
                             historyItems.Add(New With {
                                 .TxTimestamp = txTimestampDateTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"),
                                 .BlockTimestamp = blockDateTime,
-                                .Type = itemType, .From = from, .To = too, .AmountString = amountString, .Token = symbol, .Value = amountVal,
+                                .Type = itemType, .From = from, .To = to_addr, .AmountString = amountString, .Token = symbol, .Value = amountVal,
                                 .BlockHash = block.Hash, .TxId = txId, .Status = "Completed"
                             })
                         End If
@@ -376,8 +449,12 @@ Public Class Blockchain
                         Dim owner = transactionData("owner")?.ToString()
                         Dim symbol = transactionData("symbol")?.ToString()
                         Dim name = transactionData("name")?.ToString()
-                        Dim initialSupply = transactionData("initialSupply")?.ToObject(Of Decimal)()
-                        If owner = address Then
+                        Dim initialSupply As Decimal = 0D
+                        If transactionData("initialSupply") IsNot Nothing Then
+                            Try : initialSupply = transactionData("initialSupply").ToObject(Of Decimal)() : Catch : End Try
+                        End If
+
+                        If String.Equals(owner, address, StringComparison.Ordinal) Then
                             historyItems.Add(New With {
                                 .TxTimestamp = txTimestampDateTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"),
                                 .BlockTimestamp = blockDateTime, .Type = "Token Creation", .From = "N/A", .To = owner,
@@ -387,32 +464,45 @@ Public Class Blockchain
                         End If
                     End If
                 Catch ex As Exception
-                    Console.WriteLine($"Error processing chain transaction for history: {ex.Message}")
+                    Console.WriteLine($"Error processing chain transaction for history: {ex.Message} - Wrapper: {transactionWrapper.ToString(Formatting.None)}")
                 End Try
             Next
         Next
 
-        For Each mempoolTxWrapper As JObject In _mempool.GetTransactions()
+        Dim mempoolSnapshot As List(Of JObject) = _mempool.GetTransactions()
+        For Each mempoolTxWrapper As JObject In mempoolSnapshot
             Try
-                Dim transactionData = JObject.Parse(mempoolTxWrapper("transaction").ToString())
+                Dim transactionToken As JToken = mempoolTxWrapper("transaction")
+                If transactionToken Is Nothing OrElse transactionToken.Type <> JTokenType.Object Then Continue For
+                Dim transactionData As JObject = CType(transactionToken, JObject)
+
                 Dim txType = transactionData("type")?.ToString()
                 Dim txId = transactionData("txId")?.ToString()
-                Dim txTimestampString = If(transactionData.ContainsKey("timestamp"), transactionData("timestamp").ToString(), DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture))
+                Dim txTimestampString = If(transactionData.ContainsKey("timestamp") AndAlso transactionData("timestamp").Type = JTokenType.String,
+                                           transactionData("timestamp").ToString(),
+                                           DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture))
                 Dim txTimestampDateTime As DateTime
-                DateTime.TryParseExact(txTimestampString, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, txTimestampDateTime)
+                If Not DateTime.TryParseExact(txTimestampString, "o", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, txTimestampDateTime) Then
+                    DateTime.TryParse(txTimestampString, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal Or DateTimeStyles.AdjustToUniversal, txTimestampDateTime)
+                End If
+
 
                 If txType = "transfer" Then
                     Dim from = transactionData("from")?.ToString()
-                    Dim too = transactionData("to")?.ToString()
+                    Dim to_addr = transactionData("to")?.ToString()
                     Dim symbol = transactionData("token")?.ToString()
-                    Dim amountVal = transactionData("amount")?.ToObject(Of Decimal)()
-                    If from = address OrElse too = address Then
+                    Dim amountVal As Decimal = 0D
+                    If transactionData("amount") IsNot Nothing Then
+                        Try : amountVal = transactionData("amount").ToObject(Of Decimal)() : Catch : End Try
+                    End If
+
+                    If String.Equals(from, address, StringComparison.Ordinal) OrElse String.Equals(to_addr, address, StringComparison.Ordinal) Then
                         Dim amountString = ""
-                        If from = address Then amountString = $"-{amountVal} {symbol}"
-                        If too = address Then amountString = $"+{amountVal} {symbol}"
+                        If String.Equals(from, address, StringComparison.Ordinal) Then amountString = $"-{amountVal} {symbol}"
+                        If String.Equals(to_addr, address, StringComparison.Ordinal) Then amountString = $"+{amountVal} {symbol}"
                         historyItems.Add(New With {
                             .TxTimestamp = txTimestampDateTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"),
-                            .BlockTimestamp = "Pending", .Type = "Transfer", .From = from, .To = too,
+                            .BlockTimestamp = "Pending", .Type = "Transfer", .From = from, .To = to_addr,
                             .AmountString = amountString,
                             .Token = symbol, .Value = amountVal, .BlockHash = "Pending", .TxId = txId, .Status = "Pending"
                         })
@@ -421,8 +511,12 @@ Public Class Blockchain
                     Dim owner = transactionData("owner")?.ToString()
                     Dim symbol = transactionData("symbol")?.ToString()
                     Dim name = transactionData("name")?.ToString()
-                    Dim initialSupply = transactionData("initialSupply")?.ToObject(Of Decimal)()
-                    If owner = address Then
+                    Dim initialSupply As Decimal = 0D
+                    If transactionData("initialSupply") IsNot Nothing Then
+                        Try : initialSupply = transactionData("initialSupply").ToObject(Of Decimal)() : Catch : End Try
+                    End If
+
+                    If String.Equals(owner, address, StringComparison.Ordinal) Then
                         historyItems.Add(New With {
                             .TxTimestamp = txTimestampDateTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"),
                             .BlockTimestamp = "Pending", .Type = "Token Creation", .From = "N/A", .To = owner,
@@ -432,20 +526,27 @@ Public Class Blockchain
                     End If
                 End If
             Catch ex As Exception
-                Console.WriteLine($"Error processing mempool transaction for history: {ex.Message}")
+                Console.WriteLine($"Error processing mempool transaction for history: {ex.Message} - Wrapper: {mempoolTxWrapper.ToString(Formatting.None)}")
             End Try
         Next
-        ' Sort by BlockTimestamp (desc for completed, specific handling for pending), then TxTimestamp (desc)
         Return historyItems.OrderByDescending(Function(h) If(h.Status = "Pending", DateTime.MaxValue, DateTime.ParseExact(h.BlockTimestamp, "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture))) _
                            .ThenByDescending(Function(h) DateTime.ParseExact(h.TxTimestamp, "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)) _
                            .ToList()
     End Function
 
     Public Function GetTransactionByTxId(txId As String) As Object
-        For Each block As Block In Chain
+        Dim chainSnapshot As List(Of Block)
+        SyncLock Chain
+            chainSnapshot = Chain.ToList()
+        End SyncLock
+
+        For Each block As Block In chainSnapshot
             For Each transactionWrapper As JObject In block.Data
-                Dim transactionData = JObject.Parse(transactionWrapper("transaction").ToString())
-                If transactionData("txId")?.ToString() = txId Then
+                Dim transactionToken As JToken = transactionWrapper("transaction")
+                If transactionToken Is Nothing OrElse transactionToken.Type <> JTokenType.Object Then Continue For
+                Dim transactionData As JObject = CType(transactionToken, JObject)
+
+                If String.Equals(transactionData("txId")?.ToString(), txId, StringComparison.Ordinal) Then
                     Return New With {
                         .status = "completed", .timestamp = block.Timestamp.ToString("o", CultureInfo.InvariantCulture),
                         .blockIndex = block.Index, .blockHash = block.Hash, .transaction = transactionData
@@ -455,30 +556,44 @@ Public Class Blockchain
         Next
         Dim mempoolTransactionWrapper = _mempool.GetTransactionByTxId(txId)
         If mempoolTransactionWrapper IsNot Nothing Then
-            Dim transactionData = JObject.Parse(mempoolTransactionWrapper("transaction").ToString())
-            Return New With {
-                .status = "pending", .timestamp = transactionData("timestamp")?.ToString(),
-                .blockIndex = -1, .blockHash = "N/A", .transaction = transactionData
-            }
+            Dim transactionToken As JToken = mempoolTransactionWrapper("transaction")
+            If transactionToken IsNot Nothing AndAlso transactionToken.Type = JTokenType.Object Then
+                Dim transactionData As JObject = CType(transactionToken, JObject)
+                Dim txTimestamp As String = If(transactionData.ContainsKey("timestamp") AndAlso transactionData("timestamp").Type = JTokenType.String,
+                                               transactionData("timestamp").ToString(),
+                                               "N/A")
+                Return New With {
+                    .status = "pending", .timestamp = txTimestamp,
+                    .blockIndex = -1, .blockHash = "N/A", .transaction = transactionData
+                }
+            End If
         End If
         Return Nothing
     End Function
 
     Public Function GetTokenNames() As Dictionary(Of String, String)
         Dim tokenNames As New Dictionary(Of String, String)
-        For Each block As Block In Chain
+        Dim chainSnapshot As List(Of Block)
+        SyncLock Chain
+            chainSnapshot = Chain.ToList()
+        End SyncLock
+
+        For Each block As Block In chainSnapshot
             For Each transactionWrapper As JObject In block.Data
                 Try
-                    Dim transactionData = JObject.Parse(transactionWrapper("transaction").ToString())
+                    Dim transactionToken As JToken = transactionWrapper("transaction")
+                    If transactionToken Is Nothing OrElse transactionToken.Type <> JTokenType.Object Then Continue For
+                    Dim transactionData As JObject = CType(transactionToken, JObject)
+
                     If transactionData("type")?.ToString() = "tokenCreation" Then
                         Dim symbol As String = transactionData("symbol")?.ToString()
                         Dim name As String = transactionData("name")?.ToString()
                         If symbol IsNot Nothing AndAlso name IsNot Nothing Then
-                            tokenNames(symbol) = name ' Last one wins if duplicate symbols (should be prevented by validation)
+                            tokenNames(symbol) = name
                         End If
                     End If
                 Catch ex As Exception
-                    Console.WriteLine($"Error processing transaction for token names: {ex.Message}")
+                    Console.WriteLine($"Error processing transaction for token names: {ex.Message} - Wrapper: {transactionWrapper.ToString(Formatting.None)}")
                 End Try
             Next
         Next
@@ -489,10 +604,15 @@ Public Class Blockchain
 
 #Region "Helper Functions and Validation Support"
     Public Function IsChainValid() As Boolean
-        If Chain Is Nothing OrElse Chain.Count = 0 Then Return True ' Empty chain is valid by definition
+        Dim chainSnapshot As List(Of Block)
+        SyncLock Chain
+            chainSnapshot = Chain.ToList()
+        End SyncLock
 
-        For i As Integer = 0 To Chain.Count - 1
-            Dim currentBlock = Chain(i)
+        If chainSnapshot Is Nothing OrElse chainSnapshot.Count = 0 Then Return True
+
+        For i As Integer = 0 To chainSnapshot.Count - 1
+            Dim currentBlock = chainSnapshot(i)
 
             If currentBlock.Hash <> currentBlock.CalculateHash() Then
                 Console.WriteLine($"Chain invalid: Block {currentBlock.Index} (Hash: {currentBlock.Hash.Substring(0, 8)}) hash mismatch. Calculated: {currentBlock.CalculateHash().Substring(0, 8)}")
@@ -500,19 +620,19 @@ Public Class Blockchain
             End If
 
             If i > 0 Then
-                Dim previousBlock = Chain(i - 1)
+                Dim previousBlock = chainSnapshot(i - 1)
                 If currentBlock.PreviousHash <> previousBlock.Hash Then
                     Console.WriteLine($"Chain invalid: Block {currentBlock.Index} previous hash mismatch.")
                     Return False
                 End If
-            Else ' Genesis block specific checks
+            Else
                 If currentBlock.Index <> 0 OrElse currentBlock.PreviousHash <> "0" Then
                     Console.WriteLine($"Chain invalid: Genesis block (Index {currentBlock.Index}) structure error (PrevHash: {currentBlock.PreviousHash}).")
                     Return False
                 End If
             End If
 
-            If Not currentBlock.Hash.StartsWith(New String("0", currentBlock.Difficulty)) Then
+            If Not currentBlock.Hash.StartsWith(New String("0"c, currentBlock.Difficulty)) Then
                 Console.WriteLine($"Chain invalid: Block {currentBlock.Index} PoW not met (difficulty {currentBlock.Difficulty}). Hash: {currentBlock.Hash}")
                 Return False
             End If
@@ -521,12 +641,19 @@ Public Class Blockchain
     End Function
 
     Public Function TokenNameExists(name As String) As Boolean
-        ' Checks confirmed chain
-        If TokenNameExistsOnChain_Private(name, If(Chain.Any, Chain.Last.Index, -1)) Then Return True
-        ' Checks mempool
-        For Each mempoolTxWrapper As JObject In _mempool.GetTransactions()
+        Dim lastIndex As Integer = -1
+        SyncLock Chain
+            If Chain.Any() Then lastIndex = Chain.Last().Index
+        End SyncLock
+        If TokenNameExistsOnChain_Private(name, lastIndex) Then Return True
+
+        Dim mempoolSnapshot As List(Of JObject) = _mempool.GetTransactions()
+        For Each mempoolTxWrapper As JObject In mempoolSnapshot
             Try
-                Dim transactionData = JObject.Parse(mempoolTxWrapper("transaction").ToString())
+                Dim transactionToken As JToken = mempoolTxWrapper("transaction")
+                If transactionToken Is Nothing OrElse transactionToken.Type <> JTokenType.Object Then Continue For
+                Dim transactionData As JObject = CType(transactionToken, JObject)
+
                 If transactionData("type")?.ToString() = "tokenCreation" AndAlso
                    String.Equals(transactionData("name")?.ToString(), name, StringComparison.OrdinalIgnoreCase) Then
                     Return True
@@ -538,15 +665,22 @@ Public Class Blockchain
         Return False
     End Function
 
-    Public Function TokenSymbolExists(symbol As String) As Boolean
-        ' Checks confirmed chain
-        If TokenSymbolExistsOnChain_Private(symbol, If(Chain.Any, Chain.Last.Index, -1)) Then Return True
-        ' Checks mempool
-        For Each mempoolTxWrapper As JObject In _mempool.GetTransactions()
+    Public Function TokenSymbolExists(symbolText As String) As Boolean
+        Dim lastIndex As Integer = -1
+        SyncLock Chain
+            If Chain.Any() Then lastIndex = Chain.Last().Index
+        End SyncLock
+        If TokenSymbolExistsOnChain_Private(symbolText, lastIndex) Then Return True
+
+        Dim mempoolSnapshot As List(Of JObject) = _mempool.GetTransactions()
+        For Each mempoolTxWrapper As JObject In mempoolSnapshot
             Try
-                Dim transactionData = JObject.Parse(mempoolTxWrapper("transaction").ToString())
+                Dim transactionToken As JToken = mempoolTxWrapper("transaction")
+                If transactionToken Is Nothing OrElse transactionToken.Type <> JTokenType.Object Then Continue For
+                Dim transactionData As JObject = CType(transactionToken, JObject)
+
                 If transactionData("type")?.ToString() = "tokenCreation" AndAlso
-                   transactionData("symbol")?.ToString() = symbol Then
+                   String.Equals(transactionData("symbol")?.ToString(), symbolText, StringComparison.Ordinal) Then
                     Return True
                 End If
             Catch ex As Exception
@@ -558,79 +692,107 @@ Public Class Blockchain
 
     Friend Function GetBalanceAtBlock_Private(address As String, tokenSymbol As String, upToBlockIndex As Integer) As Decimal
         Dim balance As Decimal = 0D
-        If upToBlockIndex < 0 AndAlso Chain.Count = 0 Then Return 0D ' No blocks to check
+        Dim chainToCheck As List(Of Block)
+        SyncLock Chain
+            chainToCheck = Chain.Where(Function(b) b.Index <= upToBlockIndex).ToList()
+        End SyncLock
 
-        For i As Integer = 0 To Math.Min(upToBlockIndex, Me.Chain.Count - 1)
-            Dim block = Me.Chain(i)
+        If Not chainToCheck.Any() Then Return 0D
+
+        For Each block As Block In chainToCheck
             For Each transactionWrapper As JObject In block.Data
                 Try
-                    Dim transactionData = JObject.Parse(transactionWrapper("transaction").ToString())
+                    Dim transactionToken As JToken = transactionWrapper("transaction")
+                    If transactionToken Is Nothing OrElse transactionToken.Type <> JTokenType.Object Then Continue For
+                    Dim transactionData As JObject = CType(transactionToken, JObject)
+
                     Dim txType = transactionData("type")?.ToString()
 
                     If txType = "tokenCreation" Then
                         Dim owner = transactionData("owner")?.ToString()
-                        Dim symbol = transactionData("symbol")?.ToString()
-                        Dim initialSupply = transactionData("initialSupply")?.ToObject(Of Decimal)()
-                        If owner = address AndAlso symbol = tokenSymbol Then
+                        Dim symbol_val = transactionData("symbol")?.ToString()
+                        Dim initialSupply As Decimal = 0D
+                        If transactionData("initialSupply") IsNot Nothing Then
+                            Try : initialSupply = transactionData("initialSupply").ToObject(Of Decimal)() : Catch : End Try
+                        End If
+
+                        If String.Equals(owner, address, StringComparison.Ordinal) AndAlso String.Equals(symbol_val, tokenSymbol, StringComparison.Ordinal) Then
                             balance += initialSupply
                         End If
                     ElseIf txType = "transfer" Then
                         Dim from = transactionData("from")?.ToString()
-                        Dim too = transactionData("to")?.ToString()
-                        Dim symbol = transactionData("token")?.ToString()
-                        Dim amountVal = transactionData("amount")?.ToObject(Of Decimal)()
+                        Dim to_addr = transactionData("to")?.ToString()
+                        Dim symbol_val = transactionData("token")?.ToString()
+                        Dim amountVal As Decimal = 0D
+                        If transactionData("amount") IsNot Nothing Then
+                            Try : amountVal = transactionData("amount").ToObject(Of Decimal)() : Catch : End Try
+                        End If
 
-                        If symbol = tokenSymbol Then
-                            If from = address Then
+                        If String.Equals(symbol_val, tokenSymbol, StringComparison.Ordinal) Then
+                            If String.Equals(from, address, StringComparison.Ordinal) Then
                                 balance -= amountVal
                             End If
-                            If too = address Then
+                            If String.Equals(to_addr, address, StringComparison.Ordinal) Then
                                 balance += amountVal
                             End If
                         End If
                     End If
                 Catch ex As Exception
-                    Console.WriteLine($"Error processing chain transaction for balance (GetBalanceAtBlock_Private): {ex.Message} - {transactionWrapper.ToString()}")
+                    Console.WriteLine($"Error processing chain transaction for balance (GetBalanceAtBlock_Private): {ex.Message} - Wrapper: {transactionWrapper.ToString(Formatting.None)}")
                 End Try
             Next
         Next
-        Return If(balance < 0D, 0D, balance) ' Should not really happen with valid tx but as a safeguard
+        Return If(balance < 0D, 0D, balance)
     End Function
 
     Friend Function TokenNameExistsOnChain_Private(name As String, upToBlockIndex As Integer) As Boolean
-        If upToBlockIndex < 0 AndAlso Chain.Count = 0 Then Return False
+        Dim chainToCheck As List(Of Block)
+        SyncLock Chain
+            chainToCheck = Chain.Where(Function(b) b.Index <= upToBlockIndex).ToList()
+        End SyncLock
 
-        For i As Integer = 0 To Math.Min(upToBlockIndex, Me.Chain.Count - 1)
-            Dim block = Me.Chain(i)
+        If Not chainToCheck.Any() Then Return False
+
+        For Each block As Block In chainToCheck
             For Each transactionWrapper As JObject In block.Data
                 Try
-                    Dim transactionData = JObject.Parse(transactionWrapper("transaction").ToString())
+                    Dim transactionToken As JToken = transactionWrapper("transaction")
+                    If transactionToken Is Nothing OrElse transactionToken.Type <> JTokenType.Object Then Continue For
+                    Dim transactionData As JObject = CType(transactionToken, JObject)
+
                     If transactionData("type")?.ToString() = "tokenCreation" AndAlso
                        String.Equals(transactionData("name")?.ToString(), name, StringComparison.OrdinalIgnoreCase) Then
                         Return True
                     End If
                 Catch ex As Exception
-                    Console.WriteLine($"Error processing transaction in TokenNameExistsOnChain_Private: {ex.Message}")
+                    Console.WriteLine($"Error processing transaction in TokenNameExistsOnChain_Private: {ex.Message} - Wrapper: {transactionWrapper.ToString(Formatting.None)}")
                 End Try
             Next
         Next
         Return False
     End Function
 
-    Friend Function TokenSymbolExistsOnChain_Private(symbolVal As String, upToBlockIndex As Integer) As Boolean
-        If upToBlockIndex < 0 AndAlso Chain.Count = 0 Then Return False
+    Friend Function TokenSymbolExistsOnChain_Private(symbolValText As String, upToBlockIndex As Integer) As Boolean
+        Dim chainToCheck As List(Of Block)
+        SyncLock Chain
+            chainToCheck = Chain.Where(Function(b) b.Index <= upToBlockIndex).ToList()
+        End SyncLock
 
-        For i As Integer = 0 To Math.Min(upToBlockIndex, Me.Chain.Count - 1)
-            Dim block = Me.Chain(i)
+        If Not chainToCheck.Any() Then Return False
+
+        For Each block As Block In chainToCheck
             For Each transactionWrapper As JObject In block.Data
                 Try
-                    Dim transactionData = JObject.Parse(transactionWrapper("transaction").ToString())
+                    Dim transactionToken As JToken = transactionWrapper("transaction")
+                    If transactionToken Is Nothing OrElse transactionToken.Type <> JTokenType.Object Then Continue For
+                    Dim transactionData As JObject = CType(transactionToken, JObject)
+
                     If transactionData("type")?.ToString() = "tokenCreation" AndAlso
-                       transactionData("symbol")?.ToString() = symbolVal Then
+                       String.Equals(transactionData("symbol")?.ToString(), symbolValText, StringComparison.Ordinal) Then
                         Return True
                     End If
                 Catch ex As Exception
-                    Console.WriteLine($"Error processing transaction in TokenSymbolExistsOnChain_Private: {ex.Message}")
+                    Console.WriteLine($"Error processing transaction in TokenSymbolExistsOnChain_Private: {ex.Message} - Wrapper: {transactionWrapper.ToString(Formatting.None)}")
                 End Try
             Next
         Next
@@ -639,21 +801,39 @@ Public Class Blockchain
 
     Public Function GetTotalSupply(tokenSymbol As String) As Decimal
         Dim totalSupply As Decimal = 0D
-        For Each block As Block In Chain
+        Dim chainSnapshot As List(Of Block)
+        SyncLock Chain
+            chainSnapshot = Chain.ToList()
+        End SyncLock
+
+        For Each block As Block In chainSnapshot
             For Each transactionWrapper As JObject In block.Data
                 Try
-                    Dim transactionData = JObject.Parse(transactionWrapper("transaction").ToString())
-                    Dim txType = transactionData("type")?.ToString()
+                    Dim transactionToken As JToken = transactionWrapper("transaction")
+                    If transactionToken Is Nothing OrElse transactionToken.Type <> JTokenType.Object Then Continue For
+                    Dim transactionData As JObject = CType(transactionToken, JObject)
 
-                    If txType = "tokenCreation" AndAlso transactionData("symbol")?.ToString() = tokenSymbol Then
-                        totalSupply += transactionData("initialSupply")?.ToObject(Of Decimal)()
+                    Dim txType = transactionData("type")?.ToString()
+                    Dim currentSymbolForCreation = transactionData("symbol")?.ToString()
+                    Dim currentTokenForTransfer = transactionData("token")?.ToString()
+
+                    If txType = "tokenCreation" AndAlso String.Equals(currentSymbolForCreation, tokenSymbol, StringComparison.Ordinal) Then
+                        Dim supply As Decimal = 0D
+                        If transactionData("initialSupply") IsNot Nothing Then
+                            Try : supply = transactionData("initialSupply").ToObject(Of Decimal)() : Catch : End Try
+                        End If
+                        totalSupply += supply
                     ElseIf txType = "transfer" AndAlso
-                           transactionData("token")?.ToString() = tokenSymbol AndAlso
-                           transactionData("from")?.ToString() = "miningReward" Then ' Coinbase for the specified token
-                        totalSupply += transactionData("amount")?.ToObject(Of Decimal)()
+                           String.Equals(currentTokenForTransfer, tokenSymbol, StringComparison.Ordinal) AndAlso
+                           String.Equals(transactionData("from")?.ToString(), "miningReward", StringComparison.OrdinalIgnoreCase) Then
+                        Dim amount As Decimal = 0D
+                        If transactionData("amount") IsNot Nothing Then
+                            Try : amount = transactionData("amount").ToObject(Of Decimal)() : Catch : End Try
+                        End If
+                        totalSupply += amount
                     End If
                 Catch ex As Exception
-                    Console.WriteLine($"Error processing transaction for total supply: {ex.Message}")
+                    Console.WriteLine($"Error processing transaction for total supply: {ex.Message} - Wrapper: {transactionWrapper.ToString(Formatting.None)}")
                 End Try
             Next
         Next
