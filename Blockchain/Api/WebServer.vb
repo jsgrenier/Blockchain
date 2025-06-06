@@ -81,7 +81,17 @@ Public Class WebServer
     End Sub
 
     Private Sub HandleRequests()
-        Dim handler As New RequestHandler(blockchain)
+        'Dim handler As New RequestHandler(blockchain) ' OLD
+
+        Dim dbPathForHandler As String = blockchain.GetDatabaseFilePath() ' Get the path from Blockchain
+        If String.IsNullOrEmpty(dbPathForHandler) Then
+            Console.WriteLine("CRITICAL ERROR: Database file path from Blockchain object is null or empty. Historical hashrate API will fail.")
+        Else
+            Console.WriteLine($"WebServer: Initializing RequestHandler with DB path: {dbPathForHandler}")
+        End If
+
+        Dim handler As New RequestHandler(blockchain, dbPathForHandler) ' NEW - Pass the obtained path
+
         Try
             While IsRunning AndAlso (server IsNot Nothing AndAlso server.IsListening)
                 Dim context As HttpListenerContext = Nothing

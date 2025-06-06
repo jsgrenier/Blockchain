@@ -1,4 +1,4 @@
-﻿Imports System.Security.Cryptography
+Imports System.Security.Cryptography
 Imports System.Text
 Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
@@ -11,7 +11,7 @@ Public Class Block
     Public Property Data As List(Of JObject)
     Public Property PreviousHash As String
     Public Property Hash As String
-    Public Property Nonce As Integer
+    Public Property Nonce As Long ' Changed from Integer to Long
     Public Property Difficulty As Integer
     Public Property BlockSize As Integer
 
@@ -19,26 +19,29 @@ Public Class Block
     Public Shared LastCalculatedDataToHash As String = ""
 
     Public Const PreciseTimestampFormat As String = "yyyy-MM-ddTHH:mm:ss.fffffffZ"
+    Public Const MAX_NONCE_VALUE_UINT32_EQUIVALENT As Long = 4294967295L ' Represents UInteger.MaxValue
 
+    ' Constructor for creating new blocks before mining
     Public Sub New(index As Integer, timestamp As DateTime, data As List(Of JObject), previousHash As String, difficulty As Integer)
         Me.Index = index
         Me.Timestamp = timestamp
         Me.Data = data
         Me.PreviousHash = previousHash
         Me.Difficulty = difficulty
-        Me.Nonce = 0
-        Me.Hash = CalculateHash()
-        Me.BlockSize = CalculateBlockSize()
+        Me.Nonce = 0L ' Initialize Nonce as Long
+        Me.Hash = CalculateHash() ' Calculate initial hash (with nonce 0)
+        Me.BlockSize = CalculateBlockSize() ' Calculate initial block size
     End Sub
 
+    ' JsonConstructor for deserializing blocks (e.g., from database or network)
     <JsonConstructor>
-    Public Sub New(index As Integer, timestamp As DateTime, data As List(Of JObject), previousHash As String, hash As String, nonce As Integer, difficulty As Integer, blockSize As Integer)
+    Public Sub New(index As Integer, timestamp As DateTime, data As List(Of JObject), previousHash As String, hash As String, nonce As Long, difficulty As Integer, blockSize As Integer)
         Me.Index = index
         Me.Timestamp = timestamp
         Me.Data = data
         Me.PreviousHash = previousHash
         Me.Hash = hash
-        Me.Nonce = nonce
+        Me.Nonce = nonce ' Assign deserialized Long nonce
         Me.Difficulty = difficulty
         Me.BlockSize = blockSize
     End Sub
@@ -54,11 +57,9 @@ Public Class Block
                 For i As Integer = 0 To Me.Data.Count - 1
                     Dim jobjWrapper As JObject = Me.Data(i)
                     If jobjWrapper IsNot Nothing Then
-                        ' JObject.ToString(Formatting.None) should be literal for its JValue(String) properties
-                        ' assuming the JValue was created as a string and not re-parsed as a date internally.
                         sbJsonArray.Append(jobjWrapper.ToString(Formatting.None))
                     Else
-                        sbJsonArray.Append("null") ' Should not happen if Data is clean
+                        sbJsonArray.Append("null") 
                     End If
                     If i < Me.Data.Count - 1 Then
                         sbJsonArray.Append(",")
@@ -70,9 +71,8 @@ Public Class Block
             ' --- End Manual construction ---
 
         Catch ex As Exception
-            ' It's good to log critical errors, but for release, you might have a more robust logging system.
             ' Console.WriteLine($"CRITICAL ERROR during Me.Data serialization in CalculateHash: {ex.ToString()}")
-            dataJson = "[]" ' Fallback to prevent crash, this will cause hash mismatch if error occurs
+            dataJson = "[]" 
         End Try
 
         Dim formattedBlockTimestamp As String = Me.Timestamp.ToUniversalTime().ToString(PreciseTimestampFormat, CultureInfo.InvariantCulture)
@@ -81,28 +81,41 @@ Public Class Block
                                      formattedBlockTimestamp &
                                      dataJson &
                                      Me.PreviousHash &
-                                     Me.Nonce.ToString() &
+                                     Me.Nonce.ToString() & ' .ToString() on a Long is fine
                                      Me.Difficulty.ToString()
 
-        ' LastCalculatedDataToHash = tempDataToHash ' You can uncomment this if you need to debug again later.
+        ' LastCalculatedDataToHash = tempDataToHash ' For debugging if needed
 
         Return HashString(tempDataToHash)
     End Function
 
+    ' This Mine method is primarily for server-side testing or solo mining if ever implemented directly in VB.NET.
+    ' The Python client uses its own mining loops.
     Public Sub Mine()
         Dim leadingZeros As String = New String("0"c, Me.Difficulty)
-        Me.Nonce = 0
-        Me.Hash = CalculateHash()
+        Dim currentNonceInLoop As Long = 0L ' Use a local Long variable for the loop
+
+        Me.Nonce = currentNonceInLoop ' Set initial nonce for the block property
+        Me.Hash = CalculateHash()     ' Calculate hash with initial nonce
+
         While Not Me.Hash.StartsWith(leadingZeros)
-            Me.Nonce += 1
-            Me.Hash = CalculateHash()
-            If Me.Nonce = Integer.MaxValue Then
-                ' This is an extreme edge case, means difficulty is likely too high for current processing power
-                ' or there's an issue in the mining loop / hash calculation making it impossible to find a solution.
-                ' For a real system, you might log this or have other behavior.
-                Exit While
+            currentNonceInLoop += 1
+
+            If currentNonceInLoop > MAX_NONCE_VALUE_UINT32_EQUIVALENT Then
+                ' Nonce search space for a 32-bit unsigned integer equivalent is exhausted.
+                ' This means for the current block data (timestamp, transactions), no solution was found.
+                ' In a real scenario, the mining process would typically update the timestamp
+                ' or select different transactions to change the hash input and restart the nonce search.
+                ' For this simplified Mine() method, we'll just log and exit the loop.
+                Console.WriteLine($"Block.Mine (Index: {Me.Index}): Nonce search exceeded {MAX_NONCE_VALUE_UINT32_EQUIVALENT}. Stopping search for this attempt.")
+                Exit While ' Stop mining this particular configuration of the block
             End If
+
+            Me.Nonce = currentNonceInLoop ' Update the block's actual Nonce property
+            Me.Hash = CalculateHash()     ' Recalculate hash with the new nonce
         End While
+        
+        ' Update block size after mining (nonce and hash might have changed its length)
         Me.BlockSize = CalculateBlockSize()
     End Sub
 
@@ -115,18 +128,15 @@ Public Class Block
     End Function
 
     Public Function CalculateBlockSize() As Integer
-        ' Create a temporary JObject to represent the block for serialization to get size.
-        ' This ensures we are measuring the size of the fields as they would be serialized.
         Dim tempBlockForSizing As New JObject()
         tempBlockForSizing("Index") = Me.Index
         tempBlockForSizing("Timestamp") = Me.Timestamp.ToUniversalTime().ToString(PreciseTimestampFormat, CultureInfo.InvariantCulture)
-        tempBlockForSizing("Data") = JToken.FromObject(Me.Data) ' Represents the list of JObjects
+        tempBlockForSizing("Data") = JToken.FromObject(Me.Data) 
         tempBlockForSizing("PreviousHash") = Me.PreviousHash
-        tempBlockForSizing("Hash") = Me.Hash ' Include current hash
-        tempBlockForSizing("Nonce") = Me.Nonce
+        tempBlockForSizing("Hash") = Me.Hash 
+        tempBlockForSizing("Nonce") = Me.Nonce ' Nonce is now Long
         tempBlockForSizing("Difficulty") = Me.Difficulty
-        ' BlockSize itself is not part of the string used to calculate BlockSize to avoid recursion.
-
+        
         Dim blockDataString = tempBlockForSizing.ToString(Formatting.None)
         Return Encoding.UTF8.GetBytes(blockDataString).Length
     End Function
